@@ -40,20 +40,21 @@ metadata:
 - Noms canoniques en sortie : `{Track}_{R|P|Q}_{ISO-date}.duckdb` (format parsé par le frontend).
 - Quirks connus : GPS = coordonnées monde du jeu (pas géographiques, rendu OK), secteurs s1/s2 parfois manquants, voir mémoire [[project-ld-converter]].
 
-## Phase « Mode Avancé » — DAMPlugin réintégré (PROCHAINE PHASE — plan prêt)
+## Phase « Mode Avancé » — DAMPlugin (EN COURS — gros du travail fait le 2026-06-11 tard)
 
-**→ Plan d'implémentation détaillé : [PLAN_PHASE_MODE_AVANCE.md](PLAN_PHASE_MODE_AVANCE.md)** (écrit le 2026-06-11 soir : étapes 0–5 avec fichiers/lignes exacts, ordre d'exécution, risques). Découverte clé : backend (`fuse_session_data` + `/telemetry`) et barre d'onglets frontend sont déjà 100% génériques — les canaux DAMPlugin transitent sans toucher au pipeline. Travail réel = plugin manager + mappings convertisseur + onglets UI. `DAMPluginManager` complet existe déjà dans `F:\Claude Code\LMU Setup\src\lmu_ri\dam_plugin.py` (à porter).
+Plan : [PLAN_PHASE_MODE_AVANCE.md](PLAN_PHASE_MODE_AVANCE.md). Référence canaux : [docs/damplugin_channels.md](docs/damplugin_channels.md).
 
-Demande Thierry 2026-06-11 : afficher les canaux supplémentaires du DAMPlugin dans l'app, avec les mêmes types de graphes que les canaux actuels. À faire APRÈS la V1 standard mais à anticiper.
+**Fait ✅** :
+- **Plugin réinstallé à la main** : DLL dans `Bin64\Plugins\`, PluginData à la racine du jeu, tous les groupes Extra de `DAMPlugin.ini` à 1 (245 canaux). `Active on startup=1` → logging auto, Ctrl+M pour toggler en jeu. Logs dans `<LMU>\LOG\` (.ld + .ldx + copie .svm du setup).
+- **Discovery** : .ld frais Spa P1 du 11/06 23h30 → 245 canaux, noms exacts + unités dans `docs/damplugin_channels.md`.
+- **Convertisseur** (commit `9e2a564`) : 23 nouveaux canaux mappés → tables `TyreLoad`, `GripFract`, `CamberDyn`, `ToeDyn`, `TyreLatForce/LongForce`, `VertTyreDeflection`, `BrakePressure`, `TyresRubberTempInner/Outer`, `BodyPitch/Roll`, `DownforceFront/Rear`, `Drag` (bug « Brakes Force » corrigé), `EngineTorque`, `FrontWingHeight`, `BodyRot*`, `Motor*`. Validé : 23/23 tables, valeurs physiques OK.
+- **Frontend** (commit `1d4a9a4`) : onglets **TYRES PRO / AERO / CHASSIS** + toggle **Engineer Mode** (Off/DAMPlugin) dans Settings, état `engineerMode` persisté. Onglets visibles seulement si mode ON **et** canaux présents dans la session. `tsc --noEmit` passe.
 
-- **Pourquoi** : ~57 canaux « ingénieur setup » ABSENTS du .duckdb natif — Tyre Load, Grip Fract, **carrossage + pincement DYNAMIQUES** (mesurés en roulant, l'info clé pour régler), forces pneus Lat/Long, downforce/drag, body pitch/roll, ride heights, températures rubber I/C/O. Cf. comparaison du 11/06 : natif=189 canaux, DAMPlugin complet=245 canaux, intersection ~57 canaux uniques au DAMPlugin.
-- **État actuel du plugin** : DLL présente dans `Plugins\` mais ABSENTE de `Bin64\Plugins\` (la MAJ jeu du 11/06 l'a virée). `DAMPlugin.ini` toujours dans `UserData\player\` (10/05). `CustomPluginVariables.JSON` : `"DAMPlugin.dll": {"Enabled": 1}`.
-- **À faire** :
-  1. Réactiver l'injection (assets dans `F:\Claude Code\LMU Setup\damplugin\` + module `dam_plugin.py` qui copie vers `Bin64\Plugins\` et patch le JSON). Vérifier que le plugin survit aux MAJ futures.
-  2. Workflow `.ld` parallèle au `.duckdb` à chaque session — le convertisseur `ld_converter.py` est déjà fait et géré côté backend.
-  3. Toggle UI « Advanced channels » / « Engineer Mode » dans FileManager ou Settings → dévoile les canaux supplémentaires.
-  4. Onglets dédiés à ajouter aux côtés de Driver/Tyres/Dynamics/Handling/Systems : **Pneus avancé** (Tyre Load 4 roues, Grip Fract, Carcass Temp, Rubber I/C/O), **Aéro** (Downforce F/R, Drag, Ride Heights F/R), **Châssis** (Body Pitch/Roll, Susp Forces, Camber/Toe dynamiques).
-  5. Le coach IA exploitera aussi ces canaux quand dispo (analyse carrossage à partir de la distribution réelle des températures pneus, par ex).
+**Reste à faire ⏳** :
+1. **Test visuel E2E** (priorité) : importer `<LMU>\LOG\2026-06-11 - 23-30-00 - Circuit de Spa-Francorchamps - P1.ld`, activer Engineer Mode, vérifier onglets + graphes.
+2. Étape 3 du plan : scan du dossier `LOG\` dans `/sessions/import-ld` + dédup .ld-prioritaire (même session = .ld 245 canaux remplace le .duckdb natif 189).
+3. Étape 1 du plan : endpoints `GET /system/damplugin/status` / activate / deactivate + bannière « plugin supprimé par MAJ jeu » (moins urgent, plugin actif).
+4. Le coach IA exploitera ces canaux (ex. analyse carrossage via température rubber I/C/O).
 
 ## Briques réutilisables de l'ancien projet `F:\Claude Code\LMU Setup`
 
