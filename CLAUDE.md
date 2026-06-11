@@ -40,7 +40,9 @@ metadata:
 - Noms canoniques en sortie : `{Track}_{R|P|Q}_{ISO-date}.duckdb` (format parsé par le frontend).
 - Quirks connus : GPS = coordonnées monde du jeu (pas géographiques, rendu OK), secteurs s1/s2 parfois manquants, voir mémoire [[project-ld-converter]].
 
-## Phase « Mode Avancé » — DAMPlugin réintégré (planifié, post-V1)
+## Phase « Mode Avancé » — DAMPlugin réintégré (PROCHAINE PHASE — plan prêt)
+
+**→ Plan d'implémentation détaillé : [PLAN_PHASE_MODE_AVANCE.md](PLAN_PHASE_MODE_AVANCE.md)** (écrit le 2026-06-11 soir : étapes 0–5 avec fichiers/lignes exacts, ordre d'exécution, risques). Découverte clé : backend (`fuse_session_data` + `/telemetry`) et barre d'onglets frontend sont déjà 100% génériques — les canaux DAMPlugin transitent sans toucher au pipeline. Travail réel = plugin manager + mappings convertisseur + onglets UI. `DAMPluginManager` complet existe déjà dans `F:\Claude Code\LMU Setup\src\lmu_ri\dam_plugin.py` (à porter).
 
 Demande Thierry 2026-06-11 : afficher les canaux supplémentaires du DAMPlugin dans l'app, avec les mêmes types de graphes que les canaux actuels. À faire APRÈS la V1 standard mais à anticiper.
 
