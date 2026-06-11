@@ -4,7 +4,8 @@ import { useTelemetryStore } from '../store/telemetryStore';
 import type { Session } from '../types';
 import {
     Database, Search, Upload, Link, Trash2, Settings2, Check, X, Info, Loader2,
-    ChevronRight, ChevronDown, MapPin, History as HistoryIcon, Timer, Package, Car, Trophy, LayoutGrid, Clock
+    ChevronRight, ChevronDown, MapPin, History as HistoryIcon, Timer, Package, Car, Trophy, LayoutGrid, Clock,
+    FolderSync
 } from 'lucide-react';
 import { handleGlassMouseMove } from '../utils/glassEffect';
 import { Tooltip } from './ui/Tooltip';
@@ -39,6 +40,8 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
     const [tempPath, setTempPath] = useState(telemetryPath);
     const [pathExists, setPathExists] = useState(true);
     const [newlyUploadedId, setNewlyUploadedId] = useState<string | null>(null);
+    const [isImporting, setIsImporting] = useState(false);
+    const [importMessage, setImportMessage] = useState<string | null>(null);
     const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
     const [groupingMode, setGroupingMode] = useState<'track' | 'class' | 'car' | 'all'>(() => (localStorage.getItem('file_manager_grouping') as any) || 'track');
     const [classSubModes, setClassSubModes] = useState<Record<string, 'track' | 'car'>>(() => JSON.parse(localStorage.getItem('file_manager_class_submodes') || '{}'));
@@ -80,6 +83,14 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
         const checkPath = async () => {
             const exists = await apiClient.validatePath(telemetryPath);
             setPathExists(exists);
+            if (!exists) {
+                // Try to auto-detect the LMU installation
+                const detected = await apiClient.detectLmuPath();
+                if (detected) {
+                    setTelemetryPath(detected);
+                    localStorage.setItem('lmu_telemetry_path', detected);
+                }
+            }
         };
         checkPath();
     }, [telemetryPath]);
@@ -234,7 +245,7 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
         setIsDragging(false);
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
             const file = e.dataTransfer.files[0];
-            if (file.name.endsWith(".duckdb")) {
+            if (file.name.endsWith(".duckdb") || file.name.endsWith(".ld")) {
                 const id = await uploadSession(file);
                 // Auto expand after upload
                 setTimeout(() => {
@@ -261,6 +272,31 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
         setTelemetryPath(cleanedPath);
         localStorage.setItem('lmu_telemetry_path', cleanedPath);
         setIsEditingPath(false);
+    };
+
+    const handleImportFolder = async () => {
+        setIsImporting(true);
+        setImportMessage(null);
+        try {
+            const result = await apiClient.importLdFolder(telemetryPath, activeProfileId);
+            await fetchSessions();
+            if (result.converted.length > 0) {
+                setImportMessage(`✓ ${result.message}`);
+                setTimeout(() => {
+                    const freshSessions = useTelemetryStore.getState().sessions;
+                    autoExpandNewestSession(freshSessions);
+                }, 100);
+            } else {
+                setImportMessage(result.errors.length > 0
+                    ? `⚠ ${result.errors.length} error(s) — ${result.message}`
+                    : `${result.message}`);
+            }
+        } catch (err: any) {
+            setImportMessage(`✗ ${err.message || 'Import failed'}`);
+        } finally {
+            setIsImporting(false);
+            setTimeout(() => setImportMessage(null), 6000);
+        }
     };
 
     const formatLapTime = (sec?: number) => {
@@ -418,12 +454,38 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
             <div className="px-4 pt-1 pb-1">
                 <div className={`group relative glass-container p-6 rounded-2xl flex flex-col items-center justify-center transition-all cursor-pointer ring-1 ring-inset ${isDragging ? 'bg-blue-600/20 border-blue-500/50 ring-blue-500/30' : 'bg-white/5 border-white/10 ring-white/5 hover:bg-white/10 hover:border-white/30 hover:shadow-[0_0_30px_rgba(255,255,255,0.08)]'} border`} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop} onClick={handleUploadClick} onMouseMove={handleGlassMouseMove}>
                     <div className="glass-content flex flex-col items-center justify-center w-full">
-                        <input type="file" ref={fileInputRef} className="hidden" accept=".duckdb" onChange={handleFileChange} />
+                        <input type="file" ref={fileInputRef} className="hidden" accept=".duckdb,.ld" onChange={handleFileChange} />
                         <div className="p-3 bg-white/5 rounded-full border border-white/10 mb-3 group-hover:bg-blue-600/20 group-hover:border-blue-500/30 transition-all duration-500"><Upload size={24} className={`transition-colors duration-500 ${isDragging ? 'text-blue-400' : 'text-gray-400 group-hover:text-blue-400'}`} /></div>
                         <span className="text-[12px] text-white font-black uppercase tracking-[0.15em] mb-1">Upload Telemetry</span>
-                        <span className="text-[9px] text-gray-400 font-black uppercase tracking-widest">Drop .duckdb file here</span>
+                        <span className="text-[9px] text-gray-400 font-black uppercase tracking-widest">Drop .duckdb or .ld file here</span>
                     </div>
                 </div>
+            </div>
+
+            <div className="px-4 pt-1 pb-1">
+                <button
+                    onClick={handleImportFolder}
+                    disabled={isImporting || !pathExists}
+                    className={`w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border transition-all text-[11px] font-black uppercase tracking-widest
+                        ${isImporting
+                            ? 'bg-blue-600/10 border-blue-500/30 text-blue-400 cursor-wait'
+                            : !pathExists
+                                ? 'bg-white/5 border-white/10 text-gray-600 cursor-not-allowed'
+                                : 'bg-white/5 border-white/10 text-gray-300 hover:bg-blue-600/10 hover:border-blue-500/40 hover:text-blue-300'}`}
+                >
+                    {isImporting
+                        ? <><Loader2 size={12} className="animate-spin" />Converting .ld files…</>
+                        : <><FolderSync size={12} />Import LMU Telemetry Folder</>
+                    }
+                </button>
+                {importMessage && (
+                    <div className={`mt-1.5 text-[10px] font-bold px-3 py-1.5 rounded-lg border ${importMessage.startsWith('✓')
+                        ? 'bg-green-500/10 border-green-500/20 text-green-400'
+                        : importMessage.startsWith('✗')
+                            ? 'bg-red-500/10 border-red-500/20 text-red-400'
+                            : 'bg-white/5 border-white/10 text-gray-400'}`}
+                    >{importMessage}</div>
+                )}
             </div>
 
             <div className="px-4 pt-2 pb-2">

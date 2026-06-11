@@ -195,6 +195,57 @@ async def validate_system_path(path: str = Query(...)):
     """Check if a local path exists."""
     return {"exists": os.path.exists(os.path.normpath(path))}
 
+
+@router.get("/system/detect-lmu-path")
+async def detect_lmu_path():
+    """
+    Auto-detect the LMU UserData/Telemetry folder by scanning common Steam library locations.
+    Returns the first found path, or null if none found.
+    """
+    import string
+
+    LMU_SUBPATH = os.path.join("steamapps", "common", "Le Mans Ultimate", "UserData", "Telemetry")
+
+    candidates: list[str] = []
+
+    # 1. Read Steam libraryfolders.vdf to find all configured Steam libraries
+    steam_roots: list[str] = []
+    default_steam = r"C:\Program Files (x86)\Steam"
+    if os.path.isdir(default_steam):
+        steam_roots.append(default_steam)
+
+    vdf_path = os.path.join(default_steam, "steamapps", "libraryfolders.vdf")
+    if os.path.exists(vdf_path):
+        try:
+            content = open(vdf_path, encoding="utf-8", errors="replace").read()
+            import re as _re
+            # VDF format: "path"  "D:\\SteamLibrary"
+            for m in _re.finditer(r'"path"\s+"([^"]+)"', content):
+                p = m.group(1).replace("\\\\", "\\")
+                if os.path.isdir(p):
+                    steam_roots.append(p)
+        except Exception:
+            pass
+
+    # 2. Also scan all drive letters for common SteamLibrary folder names
+    for drive in string.ascii_uppercase:
+        for lib_name in ("SteamLibrary", "Steam", "Games", "SteamGames"):
+            p = f"{drive}:\\{lib_name}"
+            if os.path.isdir(p):
+                steam_roots.append(p)
+
+    # 3. Build candidate list
+    for root in steam_roots:
+        candidates.append(os.path.join(root, LMU_SUBPATH))
+
+    # 4. Return first existing path
+    for p in candidates:
+        np = os.path.normpath(p)
+        if os.path.isdir(np):
+            return {"path": np, "found": True}
+
+    return {"path": None, "found": False}
+
 @router.post("/system/open-path")
 async def open_system_path(req: OpenPathRequest):
     """Open a local path in the system file explorer."""
@@ -270,8 +321,13 @@ async def pick_and_upload(req: OpenPathRequest, profile_id: Optional[str] = Quer
         # Open the native file picker
         file_path = filedialog.askopenfilename(
             initialdir=initial_dir,
-            title="Select LMU Telemetry File (.duckdb)",
-            filetypes=[("DuckDB files", "*.duckdb"), ("All files", "*.*")]
+            title="Select LMU Telemetry File (.duckdb or .ld)",
+            filetypes=[
+                ("LMU Telemetry files", "*.duckdb *.ld"),
+                ("DuckDB files", "*.duckdb"),
+                ("LMU native .ld", "*.ld"),
+                ("All files", "*.*"),
+            ]
         )
         
         root.destroy() # Cleanup tkinter
@@ -279,17 +335,43 @@ async def pick_and_upload(req: OpenPathRequest, profile_id: Optional[str] = Quer
         if not file_path:
             return {"status": "cancelled"}
             
-        # Copy the file to the data directory
         filename = os.path.basename(file_path)
-        dest_path = os.path.join(data_dir, filename)
-        
-        shutil.copy2(file_path, dest_path)
-        
-        return {
-            "status": "success", 
-            "id": filename, 
-            "message": f"Successfully imported {filename}"
-        }
+
+        if filename.lower().endswith(".ld"):
+            # Convert .ld → .duckdb with canonical filename
+            from ..services.ld_converter import convert_ld_to_duckdb
+            tmp_path = os.path.join(data_dir, "_tmp_ld_convert.duckdb")
+            try:
+                info = convert_ld_to_duckdb(file_path, tmp_path)
+                duckdb_filename = _canonical_db_name(info)
+                dest_path = os.path.join(data_dir, duckdb_filename)
+                if os.path.exists(dest_path):
+                    os.remove(tmp_path)
+                else:
+                    os.rename(tmp_path, dest_path)
+                return {
+                    "status": "success",
+                    "id": duckdb_filename,
+                    "message": f"Converted and imported {filename} → {duckdb_filename}",
+                    "track": info.get("track"),
+                    "driver": info.get("driver"),
+                    "laps": info.get("laps"),
+                }
+            except Exception as conv_err:
+                logger.error(f".ld conversion failed: {conv_err}", exc_info=True)
+                if os.path.exists(tmp_path):
+                    try: os.remove(tmp_path)
+                    except: pass
+                return {"status": "error", "message": f"Conversion failed: {str(conv_err)}"}
+        else:
+            # Regular .duckdb — copy as-is
+            dest_path = os.path.join(data_dir, filename)
+            shutil.copy2(file_path, dest_path)
+            return {
+                "status": "success",
+                "id": filename,
+                "message": f"Successfully imported {filename}"
+            }
         
     except Exception as e:
         logger.error(f"Native file picker failed: {e}")
@@ -352,6 +434,121 @@ async def list_steering_wheels():
 @router.get("/ping")
 async def ping():
     return {"status": "pong", "message": "API is reachable"}
+
+
+def _canonical_db_name(info: dict) -> str:
+    """
+    Build a standardized DuckDB filename matching the app's naming convention:
+    {TrackName}_{SessionLetter}_{RecordingTime}.duckdb
+
+    Example: Circuit de Spa-Francorchamps_R_2026-05-07T02_10_40Z.duckdb
+    """
+    import re as _re
+    track = info.get("track", "Unknown")
+    # Sanitize: strip filesystem-unsafe characters (but keep spaces and hyphens)
+    track = _re.sub(r'[/\\:*?"<>|]', '', track).strip()
+    stype = (info.get("session_type") or "Practice")[0].upper()   # R, P, Q
+    rec_time = info.get("recording_time", "")
+    if not rec_time:
+        from datetime import datetime as _dt
+        rec_time = _dt.utcnow().strftime("%Y-%m-%dT%H_%M_%SZ")
+    return f"{track}_{stype}_{rec_time}.duckdb"
+
+
+class LdImportRequest(BaseModel):
+    ld_dir: str
+    profile_id: Optional[str] = "guest"
+
+
+@router.post("/sessions/import-ld")
+async def import_ld_directory(req: LdImportRequest):
+    """
+    Scan a directory for LMU telemetry sessions and import any that aren't in the
+    data directory yet: native .duckdb files are copied as-is, .ld files are converted.
+
+    Returns a list of imported files and any errors.
+    """
+    from ..services.ld_converter import convert_ld_to_duckdb
+
+    ld_dir = os.path.normpath(req.ld_dir)
+    if not os.path.isdir(ld_dir):
+        raise HTTPException(status_code=400, detail=f"Directory not found: {ld_dir}")
+
+    data_dir, _ = get_contextual_dirs(req.profile_id)
+
+    src_files = os.listdir(ld_dir)
+    ld_files = [f for f in src_files if f.lower().endswith(".ld")]
+    duckdb_files = [f for f in src_files if f.lower().endswith(".duckdb")]
+    if not ld_files and not duckdb_files:
+        return {"converted": [], "skipped": [], "errors": [], "message": "No .ld or .duckdb files found"}
+
+    converted, skipped, errors = [], [], []
+
+    # Pre-build a set of existing duckdb names for fast dedup
+    existing_db = {f.lower() for f in os.listdir(data_dir) if f.lower().endswith(".duckdb")}
+
+    # Native .duckdb sessions: straight copy
+    for fname in sorted(duckdb_files):
+        if fname.lower() in existing_db:
+            skipped.append({"file": fname, "reason": "already imported"})
+            continue
+        try:
+            src = os.path.join(ld_dir, fname)
+            dest = os.path.join(data_dir, fname)
+            shutil.copy2(src, dest)
+            existing_db.add(fname.lower())
+            converted.append({"file": fname, "id": fname})
+            logger.info(f"Imported native .duckdb: {fname}")
+        except Exception as e:
+            logger.error(f"Failed to copy {fname}: {e}", exc_info=True)
+            errors.append({"file": fname, "error": str(e)})
+
+    for fname in sorted(ld_files):
+        # First pass: check legacy name (raw .ld → .duckdb) to avoid re-converting
+        legacy_name = os.path.splitext(fname)[0] + ".duckdb"
+        if legacy_name.lower() in existing_db:
+            skipped.append({"file": fname, "reason": "already imported"})
+            continue
+
+        ld_path = os.path.join(ld_dir, fname)
+        try:
+            # Convert to a temp name first, then rename to canonical
+            tmp_path = os.path.join(data_dir, "_tmp_ld_convert.duckdb")
+            info = convert_ld_to_duckdb(ld_path, tmp_path)
+            db_name = _canonical_db_name(info)
+            dest_path = os.path.join(data_dir, db_name)
+
+            if db_name.lower() in existing_db or os.path.exists(dest_path):
+                os.remove(tmp_path)
+                skipped.append({"file": fname, "reason": "already imported"})
+                continue
+
+            os.rename(tmp_path, dest_path)
+            existing_db.add(db_name.lower())
+            converted.append({
+                "file": fname,
+                "id": db_name,
+                "track": info.get("track"),
+                "driver": info.get("driver"),
+                "laps": info.get("laps"),
+                "duration": info.get("duration"),
+            })
+            logger.info(f"Imported .ld: {fname} → {db_name}")
+        except Exception as e:
+            logger.error(f"Failed to convert {fname}: {e}", exc_info=True)
+            # Cleanup temp if it exists
+            tmp_path = os.path.join(data_dir, "_tmp_ld_convert.duckdb")
+            if os.path.exists(tmp_path):
+                try: os.remove(tmp_path)
+                except: pass
+            errors.append({"file": fname, "error": str(e)})
+
+    return {
+        "converted": converted,
+        "skipped": skipped,
+        "errors": errors,
+        "message": f"{len(converted)} converted, {len(skipped)} skipped, {len(errors)} errors",
+    }
 
 @router.get("/sessions")
 async def list_sessions(profile_id: Optional[str] = Query("guest")):
@@ -458,24 +655,53 @@ async def list_sessions(profile_id: Optional[str] = Query("guest")):
 
 @router.post("/sessions/upload")
 async def upload_session(file: UploadFile = File(...), profile_id: Optional[str] = Query("guest")):
-    """Upload a .duckdb session file."""
+    """Upload a .duckdb or .ld session file. .ld files are auto-converted."""
     data_dir, _ = get_contextual_dirs(profile_id)
-    if not file.filename.endswith(".duckdb"):
-        raise HTTPException(status_code=400, detail="Only .duckdb files are allowed")
-    
-    filename = os.path.basename(file.filename)
+    fname = file.filename or ""
+    is_ld = fname.lower().endswith(".ld")
+    is_duckdb = fname.lower().endswith(".duckdb")
+    if not is_duckdb and not is_ld:
+        raise HTTPException(status_code=400, detail="Only .duckdb or .ld files are allowed")
+
+    filename = os.path.basename(fname)
     file_path = os.path.join(data_dir, filename)
-    
-    # Check overwrite?
-    # For now, allow overwrite or append index?
-    # Simple overwrite.
-    
+
     try:
         with open(file_path, "wb") as buffer:
-            import shutil
             shutil.copyfileobj(file.file, buffer)
-            
+
+        if is_ld:
+            # Convert .ld → .duckdb with canonical filename
+            from ..services.ld_converter import convert_ld_to_duckdb
+            tmp_path = os.path.join(data_dir, "_tmp_ld_upload.duckdb")
+            try:
+                info = convert_ld_to_duckdb(file_path, tmp_path)
+                os.remove(file_path)   # remove the temp .ld
+                duckdb_filename = _canonical_db_name(info)
+                duckdb_path = os.path.join(data_dir, duckdb_filename)
+                if os.path.exists(duckdb_path):
+                    os.remove(tmp_path)
+                else:
+                    os.rename(tmp_path, duckdb_path)
+                return {
+                    "id": duckdb_filename,
+                    "status": "converted",
+                    "size": os.path.getsize(duckdb_path),
+                    "track": info.get("track"),
+                    "driver": info.get("driver"),
+                    "laps": info.get("laps"),
+                }
+            except Exception as conv_err:
+                logger.error(f".ld conversion failed for {filename}: {conv_err}", exc_info=True)
+                for p in (file_path, tmp_path):
+                    if os.path.exists(p):
+                        try: os.remove(p)
+                        except: pass
+                raise HTTPException(status_code=500, detail=f".ld conversion failed: {str(conv_err)}")
+
         return {"id": filename, "status": "uploaded", "size": os.path.getsize(file_path)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 

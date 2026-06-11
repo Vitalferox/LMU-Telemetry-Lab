@@ -273,6 +273,13 @@ export const apiClient = {
         return res.json();
     },
 
+    async detectLmuPath(): Promise<string | null> {
+        const res = await fetch(`${API_BASE}/system/detect-lmu-path`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data.found ? data.path : null;
+    },
+
     async validatePath(path: string): Promise<boolean> {
         const res = await fetch(`${API_BASE}/system/validate-path?path=${encodeURIComponent(path)}`);
         if (!res.ok) return false;
@@ -299,6 +306,24 @@ export const apiClient = {
             body: JSON.stringify({ path, ...bounds }),
         });
         if (!res.ok) throw new Error('Native picker failed');
+        return res.json();
+    },
+
+    async importLdFolder(ldDir: string, profileId: string = 'guest'): Promise<{
+        converted: { file: string; id: string; track: string; driver: string; laps: number }[];
+        skipped: { file: string; reason: string }[];
+        errors: { file: string; error: string }[];
+        message: string;
+    }> {
+        const res = await fetch(`${API_BASE}/sessions/import-ld`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ld_dir: ldDir, profile_id: profileId }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Import failed' }));
+            throw new Error(err.detail || 'Import failed');
+        }
         return res.json();
     },
 
