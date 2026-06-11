@@ -7,7 +7,7 @@ metadata:
   originSessionId: cd60d857-ef56-4e41-a1e4-39bb6c19c5c3
 ---
 
-# LMU Telemetry Lab — état au 2026-06-11 (soir)
+# LMU Telemetry Lab — état au 2026-06-12
 
 **Objectif** : analyser la télémétrie Le Mans Ultimate dans le fork de [LMU-Telemetry-Lab](https://github.com/rabbit20031225/LMU-Telemetry-Lab) (MIT, TrackMap 3D React/Three.js que Thierry adore), avec ensuite un coach IA Claude pour l'aider à régler la voiture.
 
@@ -40,21 +40,23 @@ metadata:
 - Noms canoniques en sortie : `{Track}_{R|P|Q}_{ISO-date}.duckdb` (format parsé par le frontend).
 - Quirks connus : GPS = coordonnées monde du jeu (pas géographiques, rendu OK), secteurs s1/s2 parfois manquants, voir mémoire [[project-ld-converter]].
 
-## Phase « Mode Avancé » — DAMPlugin (EN COURS — gros du travail fait le 2026-06-11 tard)
+## Phase « Mode Avancé » — DAMPlugin ✅ (terminée le 2026-06-12 : fusion natif+.ld en une session)
 
 Plan : [PLAN_PHASE_MODE_AVANCE.md](PLAN_PHASE_MODE_AVANCE.md). Référence canaux : [docs/damplugin_channels.md](docs/damplugin_channels.md).
 
-**Fait ✅** :
-- **Plugin réinstallé à la main** : DLL dans `Bin64\Plugins\`, PluginData à la racine du jeu, tous les groupes Extra de `DAMPlugin.ini` à 1 (245 canaux). `Active on startup=1` → logging auto, Ctrl+M pour toggler en jeu. Logs dans `<LMU>\LOG\` (.ld + .ldx + copie .svm du setup).
-- **Discovery** : .ld frais Spa P1 du 11/06 23h30 → 245 canaux, noms exacts + unités dans `docs/damplugin_channels.md`.
-- **Convertisseur** (commit `9e2a564`) : 23 nouveaux canaux mappés → tables `TyreLoad`, `GripFract`, `CamberDyn`, `ToeDyn`, `TyreLatForce/LongForce`, `VertTyreDeflection`, `BrakePressure`, `TyresRubberTempInner/Outer`, `BodyPitch/Roll`, `DownforceFront/Rear`, `Drag` (bug « Brakes Force » corrigé), `EngineTorque`, `FrontWingHeight`, `BodyRot*`, `Motor*`. Validé : 23/23 tables, valeurs physiques OK.
-- **Frontend** (commit `1d4a9a4`) : onglets **TYRES PRO / AERO / CHASSIS** + toggle **Engineer Mode** (Off/DAMPlugin) dans Settings, état `engineerMode` persisté. Onglets visibles seulement si mode ON **et** canaux présents dans la session. `tsc --noEmit` passe.
+**Architecture finale** : le jeu produit DEUX fichiers par session (natif `.duckdb` dans `Telemetry\` + `.ld` DAMPlugin dans `LOG\`). Ils sont **fusionnés en une seule session** à l'import : natif = base (GPS/secteurs/metadata propres), canaux DAMPlugin injectés dedans, recalés sur l'horloge native.
 
-**Reste à faire ⏳** :
-1. **Test visuel E2E** (priorité) : importer `<LMU>\LOG\2026-06-11 - 23-30-00 - Circuit de Spa-Francorchamps - P1.ld`, activer Engineer Mode, vérifier onglets + graphes.
-2. Étape 3 du plan : scan du dossier `LOG\` dans `/sessions/import-ld` + dédup .ld-prioritaire (même session = .ld 245 canaux remplace le .duckdb natif 189).
-3. Étape 1 du plan : endpoints `GET /system/damplugin/status` / activate / deactivate + bannière « plugin supprimé par MAJ jeu » (moins urgent, plugin actif).
-4. Le coach IA exploitera ces canaux (ex. analyse carrossage via température rubber I/C/O).
+**Fait ✅** :
+- **Plugin réinstallé** : DLL dans `Bin64\Plugins\`, tous les groupes Extra à 1 (245 canaux), `Active on startup=1`, Ctrl+M pour toggler. Logs dans `<LMU>\LOG\`.
+- **Convertisseur** (`ld_converter.py`) : 23+ canaux DAMPlugin mappés. **Correction axe de temps** : `Session Elapsed Time` des logs 245 canaux tourne exactement 2× trop vite → détection auto via ratio bornes-de-tours/Lap Time et rescale (`_correct_time_axis`). **Canaux morts** (constants toute la session, ex. Downforce F/R, Drag, FrontWingHeight — non alimentés par le jeu sur la 499P) supprimés à la conversion.
+- **Fusion** (`merge_extra_channels` dans ld_converter.py) : injecte les tables continues du .ld absentes du natif, horloge alignée par fit linéaire sur les bornes de tours communes (résidu < 1,5 s sinon refus), garde-fou laptimes communs. Validé : corr(Brake Pos natif, BrakePressure fusionné) = 0,92 ; corr Ground Speed = 1,0.
+- **Endpoint `POST /sessions/sync-lmu`** : scan `Telemetry\` (natifs) + `LOG\` (.ld), appariement par circuit + lettre session + heure (±3 min modulo fuseau horaire — .ld en heure locale, natif en UTC), import des nouveaux natifs, fusion des .ld appariés (flag metadata `DAMPluginMerged` → idempotent), .ld orphelins importés standalone, invalidation du cache parquet.
+- **Frontend** : auto-sync au démarrage (App.tsx) + bouton « Import LMU Telemetry Folder » rebranché sur sync-lmu. **Engineer Mode supprimé** : les onglets TYRES PRO / AERO / CHASSIS apparaissent automatiquement si les canaux sont dans la session. `chartHasData()` (telemetryStore) masque les graphes dont le canal est absent (plus de cadres vides ; gère les canaux virtuels TireHeat/RideHeights/etc.). `tsc --noEmit` passe.
+- Session Spa P1 du 11/06 fusionnée en place (26 tables DAMPlugin utiles, 4 mortes supprimées).
+
+**Reste éventuellement ⏳** :
+1. Étape 1 du plan : endpoints `GET /system/damplugin/status` / activate / deactivate + bannière « plugin supprimé par MAJ jeu » (moins urgent, plugin actif).
+2. Le coach IA exploitera ces canaux (ex. analyse carrossage via température rubber I/C/O).
 
 ## Briques réutilisables de l'ancien projet `F:\Claude Code\LMU Setup`
 

@@ -33,6 +33,7 @@ from typing import Optional
 
 import duckdb
 import numpy as np
+import pandas as pd
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +186,58 @@ def _build_laptime_events(last_laptime: np.ndarray, time_arr: np.ndarray) -> lis
             events.append((float(time_arr[i]), cur))
             prev = cur
     return events
+
+
+def _correct_time_axis(session_time: np.ndarray, decoded: dict[str, np.ndarray]) -> np.ndarray:
+    """
+    Sanity-check the Session Elapsed Time clock rate against measured lap times.
+
+    Some DAMPlugin builds write 'Session Elapsed Time' at a wrong tick rate (observed
+    exactly 2x on 245-channel logs): the whole time axis is stretched while the
+    'Last Laptime' values stay correct. Compare lap-boundary spacing against the
+    reported lap times and rescale the axis when they disagree.
+    """
+    if "Lap Number" not in decoded or "Last Laptime" not in decoded:
+        return session_time
+
+    lap_arr = decoded["Lap Number"]
+    lap_t = _build_time_for_channel(session_time, len(lap_arr))
+    boundaries = np.array([ts for ts, _ in _build_lap_events(lap_arr, lap_t)])
+
+    lt_arr = decoded["Last Laptime"]
+    lt_t = _build_time_for_channel(session_time, len(lt_arr))
+    laptimes = _build_laptime_events(lt_arr, lt_t)
+
+    if len(boundaries) < 2 or not laptimes:
+        return session_time
+
+    ratios = []
+    for ts, lap_time in laptimes:
+        if lap_time < 10.0:
+            continue
+        # The laptime event fires just after crossing the line at boundary j;
+        # that lap spans [boundary j-1, boundary j].
+        j = int(np.searchsorted(boundaries, ts + 2.0)) - 1
+        if j < 1:
+            continue
+        spacing = float(boundaries[j] - boundaries[j - 1])
+        if spacing > 0:
+            ratios.append(spacing / lap_time)
+
+    if not ratios:
+        return session_time
+
+    k = float(np.median(ratios))
+    if abs(k - 1.0) <= 0.05 or not (0.25 <= k <= 4.0):
+        return session_time
+    if max(ratios) / min(ratios) > 1.1:
+        log.warning("Inconsistent time-axis ratios %s — leaving clock unchanged",
+                    [round(r, 3) for r in ratios])
+        return session_time
+
+    t0 = float(session_time[0])
+    log.info("Time axis runs %.4fx too fast (lap spacing vs lap times) — rescaling", k)
+    return t0 + (session_time - t0) / k
 
 
 # ── Main converter ─────────────────────────────────────────────────────────────
@@ -383,6 +436,9 @@ def convert_ld_to_duckdb(ld_path: str, output_path: str) -> dict:
         if session_time[i] <= session_time[i - 1]:
             session_time[i] = session_time[i - 1] + 0.02  # 50Hz step
 
+    # Fix clock-rate bugs (e.g. 2x-stretched elapsed time on 245-channel logs)
+    session_time = _correct_time_axis(session_time, decoded)
+
     t_start = float(session_time[0])
     t_end   = float(session_time[-1])
     n_gps   = len(session_time)
@@ -445,6 +501,17 @@ def convert_ld_to_duckdb(ld_path: str, output_path: str) -> dict:
             if scale_factor != 1.0:
                 arr4 = arr4 * scale_factor
             multi_tables[db_name] = arr4
+
+    # ── 9b. Drop dead DAMPlugin extras ───────────────────────────────────────
+    # Some extra channels are recorded but never fed by the game (constant raw
+    # value all session long, e.g. Front/Rear Downforce on some cars). Dropping
+    # them here lets the frontend hide the corresponding charts.
+    for tables in (continuous_tables, multi_tables):
+        for name in [n for n in tables if n in _EXTRA_CHANNELS]:
+            arr = tables[name]
+            if arr.size and np.all(arr == arr.flat[0]):
+                log.info("Dropping dead channel %s (constant %.3f)", name, float(arr.flat[0]))
+                del tables[name]
 
     # ── 10. ABS / TC event channels ─────────────────────────────────────────
     # Detect ABS / TC level events
@@ -642,6 +709,118 @@ def convert_ld_to_duckdb(ld_path: str, output_path: str) -> dict:
         "recording_time": recording_time,
         "output":      output_path,
     }
+
+
+# DAMPlugin-only channels (absent from the native game .duckdb schema).
+# Used to drop dead (constant) recordings at conversion time.
+_EXTRA_CHANNELS = {
+    "BodyPitch", "BodyRoll", "BodyRotX", "BodyRotY", "BodyRotZ",
+    "BodyRotAccelX", "BodyRotAccelY", "BodyRotAccelZ",
+    "DownforceFront", "DownforceRear", "Drag", "DeltaBest",
+    "EngineTorque", "FrontWingHeight",
+    "MotorRPM", "MotorState", "MotorTemp", "MotorTorque", "MotorWaterTemp",
+    "CamberDyn", "ToeDyn", "TyreLoad", "GripFract",
+    "TyreLatForce", "TyreLongForce", "VertTyreDeflection", "BrakePressure",
+    "TyresRubberTempInner", "TyresRubberTempOuter", "Susp Force",
+}
+
+
+# ── Merge DAMPlugin extras into a native game .duckdb ─────────────────────────
+
+# Tables that must never be copied across, even if missing from the native db.
+_MERGE_SKIP = {"metadata", "channelsList", "eventsList", "GPS Time"}
+
+
+def merge_extra_channels(native_db_path: str, ld_db_path: str, source_name: str | None = None) -> dict:
+    """
+    Inject continuous channels that exist in a converted DAMPlugin .duckdb but not
+    in the native game .duckdb of the same session (e.g. TyreLoad, GripFract,
+    DownforceFront...). Values are resampled onto the native GPS Time grid after
+    aligning the two session clocks via shared lap boundaries.
+
+    Returns {"merged": [table names], "scale": a, "offset": b}.
+    Raises ValueError if the two files don't look like the same session.
+    """
+    con_n = duckdb.connect(native_db_path)
+    con_l = duckdb.connect(ld_db_path, read_only=True)
+    try:
+        native_gps = con_n.execute('SELECT value FROM "GPS Time" ORDER BY rowid').df()["value"].values.astype(np.float64)
+        ld_gps = con_l.execute('SELECT value FROM "GPS Time" ORDER BY rowid').df()["value"].values.astype(np.float64)
+        if len(native_gps) == 0 or len(ld_gps) == 0:
+            raise ValueError("GPS Time empty on one side")
+
+        # ── Clock alignment: native_t = a * ld_t + b ────────────────────────
+        # Pair real lap crossings (value >= 1; the first event of each file is a
+        # recording-start sentinel, not a line crossing).
+        laps_n = {int(v): float(ts) for ts, v in con_n.execute('SELECT ts, value FROM "Lap"').fetchall() if int(v) >= 1}
+        laps_l = {int(v): float(ts) for ts, v in con_l.execute('SELECT ts, value FROM "Lap"').fetchall() if int(v) >= 1}
+        common = sorted(set(laps_n) & set(laps_l))
+
+        if len(common) >= 2:
+            x = np.array([laps_l[v] for v in common])
+            y = np.array([laps_n[v] for v in common])
+            a, b = np.polyfit(x, y, 1)
+            residual = float(np.max(np.abs(a * x + b - y)))
+            if residual > 1.5:
+                raise ValueError(f"Lap boundaries don't align (residual {residual:.2f}s) — not the same session?")
+        elif len(common) == 1:
+            v = common[0]
+            a, b = 1.0, laps_n[v] - laps_l[v]
+        else:
+            # Both clocks are session-elapsed time of the same game session.
+            a, b = 1.0, 0.0
+            log.warning("No shared lap boundaries — merging with identity clock mapping")
+
+        # Sanity check via lap time values when available on both sides.
+        lt_n = [v for _, v in con_n.execute('SELECT ts, value FROM "Lap Time" WHERE value > 10').fetchall()]
+        lt_l = [v for _, v in con_l.execute('SELECT ts, value FROM "Lap Time" WHERE value > 10').fetchall()]
+        if lt_n and lt_l and not any(abs(vn - vl) < 0.5 for vn in lt_n for vl in lt_l):
+            raise ValueError("No common lap times between native and DAMPlugin files — refusing to merge")
+
+        log.info("Clock mapping: native_t = %.5f * ld_t + %.3f (%d shared laps)", a, b, len(common))
+
+        # ── Copy missing continuous tables, resampled onto the native grid ──
+        native_tables = {t[0] for t in con_n.execute("SHOW TABLES").fetchall()}
+        ld_tables = [t[0] for t in con_l.execute("SHOW TABLES").fetchall()]
+        merged = []
+
+        for table in ld_tables:
+            if table in native_tables or table in _MERGE_SKIP:
+                continue
+            cols = [c[0] for c in con_l.execute(f'DESCRIBE "{table}"').fetchall()]
+            if "ts" in cols:
+                continue  # event tables: native already has its own
+            if not (cols == ["value"] or cols == ["value1", "value2", "value3", "value4"]):
+                continue
+
+            df = con_l.execute(f'SELECT * FROM "{table}"').df()
+            if df.empty:
+                continue
+
+            t_src = a * _build_time_for_channel(ld_gps, len(df)) + b
+            outside = (native_gps < t_src[0]) | (native_gps > t_src[-1])
+
+            out = {}
+            for col in cols:
+                vals = np.interp(native_gps, t_src, df[col].values.astype(np.float64))
+                vals[outside] = np.nan
+                out[col] = vals
+            df_new = pd.DataFrame(out)
+            con_n.register("df_merge_src", df_new)
+            con_n.execute(f'CREATE TABLE "{table}" AS SELECT * FROM df_merge_src')
+            con_n.unregister("df_merge_src")
+            merged.append(table)
+
+        if merged:
+            con_n.execute("INSERT INTO metadata VALUES ('DAMPluginMerged', ?)",
+                          [source_name or os.path.basename(ld_db_path)])
+            con_n.execute("CHECKPOINT")
+
+        log.info("Merged %d DAMPlugin tables into %s", len(merged), os.path.basename(native_db_path))
+        return {"merged": merged, "scale": float(a), "offset": float(b)}
+    finally:
+        con_n.close()
+        con_l.close()
 
 
 # ── CLI entry point ────────────────────────────────────────────────────────────

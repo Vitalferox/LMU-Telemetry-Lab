@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { X, Gauge, Thermometer, Eye, EyeOff, Layout, GripVertical, RotateCcw, Move3d, Save, Compass, Activity, Settings as SettingsIcon, ArrowUpDown, FlaskConical } from 'lucide-react';
+import { X, Gauge, Thermometer, Eye, EyeOff, Layout, GripVertical, RotateCcw, Move3d, Save, Compass, Activity, Settings as SettingsIcon, ArrowUpDown } from 'lucide-react';
 import { useTelemetryStore, CATEGORY_CHART_CONFIGS, getCategoryTemplateConfigs } from '../store/telemetryStore';
 import { handleGlassMouseMove } from '../utils/glassEffect';
 import { Tooltip } from './ui/Tooltip';
@@ -110,8 +110,6 @@ export const SettingsOverlay: React.FC = () => {
     const setActiveChartCategory = useTelemetryStore(state => state.setActiveChartCategory);
     const activeChartCategory = useTelemetryStore(state => state.activeChartCategory);
     const telemetryData = useTelemetryStore(state => state.telemetryData);
-    const engineerMode = useTelemetryStore(state => state.engineerMode);
-    const setEngineerMode = useTelemetryStore(state => state.setEngineerMode);
 
     // View Modes for dynamic templates
     const tyresPressureViewMode = useTelemetryStore(state => state.tyresPressureViewMode);
@@ -301,34 +299,6 @@ export const SettingsOverlay: React.FC = () => {
                             </div>
                         </div>
                     </div>
-
-                        {/* Engineer Mode */}
-                        <div className="flex flex-col gap-4">
-                            <div className="flex items-center gap-2 text-gray-400">
-                                <FlaskConical size={16} className="text-amber-400" />
-                                <span className="text-xs font-black uppercase tracking-widest">Engineer Mode</span>
-                            </div>
-                            <div className="glass-container-flat bg-black/30 p-1.5 rounded-2xl flex border border-white/5 relative">
-                                <div
-                                    className="absolute top-1.5 bottom-1.5 w-[calc(50%-6px)] bg-white/10 backdrop-blur-md rounded-xl border border-white/10 transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] shadow-inner"
-                                    style={{ left: !engineerMode ? '6px' : 'calc(50%)' }}
-                                />
-                                <button
-                                    onClick={() => setEngineerMode(false)}
-                                    className={`relative z-10 flex-1 py-3 text-[11px] font-black uppercase transition-all rounded-xl ${!engineerMode ? 'text-white' : 'text-gray-500 hover:text-gray-300'}`}
-                                >Off</button>
-                                <button
-                                    onClick={() => setEngineerMode(true)}
-                                    className={`relative z-10 flex-1 py-3 text-[11px] font-black uppercase transition-all rounded-xl ${engineerMode ? 'text-amber-400' : 'text-gray-500 hover:text-gray-300'}`}
-                                >DAMPlugin</button>
-                            </div>
-                            {engineerMode && (
-                                <p className="text-[10px] text-amber-400/70 leading-relaxed">
-                                    Activates TYRES PRO / AERO / CHASSIS tabs.<br/>
-                                    Requires a DAMPlugin session (.ld imported).
-                                </p>
-                            )}
-                        </div>
 
                     {/* Analysis Preferences - Dual Row */}
                     <div className="grid grid-cols-2 gap-6">

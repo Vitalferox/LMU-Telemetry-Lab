@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { MapTransitionOverlay } from './components/MapTransitionOverlay';
-import { useTelemetryStore, CATEGORY_CHART_CONFIGS, ENGINEER_CATEGORIES } from './store/telemetryStore';
+import { useTelemetryStore, CATEGORY_CHART_CONFIGS, chartHasData } from './store/telemetryStore';
 import { FileManager } from './components/FileManager';
 import { TelemetryChart } from './components/TelemetryChart';
 import { TrackMap } from './components/TrackMap';
@@ -22,6 +22,7 @@ import { Tooltip } from './components/ui/Tooltip';
 import { Lab3DRoot } from './components/Lab3D/Lab3DRoot';
 import { UpdateNotifier } from './components/UpdateNotifier';
 import { CarSetupView } from './components/CarSetupView';
+import { apiClient } from './api/client';
 import {
   ArrowLeft,
   Settings,
@@ -306,7 +307,6 @@ function App() {
   const cursorIndex = useTelemetryStore(state => state.cursorIndex);
   const setActiveChartCategory = useTelemetryStore(state => state.setActiveChartCategory);
   const activeChartCategory = useTelemetryStore(state => state.activeChartCategory);
-  const engineerMode = useTelemetryStore(state => state.engineerMode);
   const referenceCursorIndex = useTelemetryStore(state => state.referenceCursorIndex);
   const referenceDeltaIndex = useTelemetryStore(state => state.referenceDeltaIndex);
   const liveDeltaStore = useTelemetryStore(state => state.liveDelta);
@@ -606,6 +606,22 @@ function App() {
     if (activeProfileId) {
       fetchSessions();
     }
+  }, [activeProfileId, fetchSessions]);
+
+  // Auto-sync with the game folders at startup: import the latest native
+  // .duckdb sessions and merge matching DAMPlugin .ld channels into them.
+  const lmuSyncDone = useRef(false);
+  useEffect(() => {
+    if (!activeProfileId || lmuSyncDone.current) return;
+    lmuSyncDone.current = true;
+    apiClient.syncLmuSessions(activeProfileId)
+      .then(result => {
+        if (result.imported.length > 0 || result.merged.length > 0) {
+          console.log(`[LMU Sync] ${result.message}`);
+          fetchSessions();
+        }
+      })
+      .catch(err => console.warn('[LMU Sync] skipped:', err?.message || err));
   }, [activeProfileId, fetchSessions]);
 
   // NEW: State to track if mouse is within window to stabilize hover effects in fullscreen
@@ -1190,9 +1206,8 @@ function App() {
                               ].filter(cat => {
                                 if (cat.id === 'Driver') return true;
                                 if (!telemetryData) return false;
-                                if (ENGINEER_CATEGORIES.includes(cat.id as any) && !engineerMode) return false;
                                 const configs = CATEGORY_CHART_CONFIGS[cat.id as any];
-                                return configs?.some(c => telemetryData[c.id] !== undefined);
+                                return configs?.some(c => chartHasData(c.id, telemetryData));
                               });
 
                               const activeIndex = availableTabs.findIndex(t => t.id === activeChartCategory);
@@ -1234,11 +1249,14 @@ function App() {
                           .filter(c => {
                             if (!c.visible) return false;
                             if (c.id === 'Time Delta' && referenceLapIdx === null && referenceLap === null) return false;
-                            
+
                             // Class-based visibility
                             if (c.id === 'SoC' && sessionMetadata?.carClass !== 'Hyper') return false;
                             if (c.id === 'ABS' && sessionMetadata?.carClass !== 'GT3') return false;
-                            
+
+                            // Hide charts whose channel is absent from this session (no empty frames)
+                            if (!chartHasData(c.id, telemetryData)) return false;
+
                             return true;
                           })
                           .sort((a, b) => a.order - b.order)

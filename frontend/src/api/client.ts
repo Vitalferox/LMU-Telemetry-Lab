@@ -309,6 +309,25 @@ export const apiClient = {
         return res.json();
     },
 
+    async syncLmuSessions(profileId: string = 'guest', telemetryDir?: string): Promise<{
+        imported: { file: string; id: string }[];
+        merged: { file: string; into: string; channels: number }[];
+        skipped: { file: string; reason: string }[];
+        errors: { file: string; error: string }[];
+        message: string;
+    }> {
+        const res = await fetch(`${API_BASE}/sessions/sync-lmu`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile_id: profileId, telemetry_dir: telemetryDir ?? null }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Sync failed' }));
+            throw new Error(err.detail || 'Sync failed');
+        }
+        return res.json();
+    },
+
     async importLdFolder(ldDir: string, profileId: string = 'guest'): Promise<{
         converted: { file: string; id: string; track: string; driver: string; laps: number }[];
         skipped: { file: string; reason: string }[];

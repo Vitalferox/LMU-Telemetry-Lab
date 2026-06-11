@@ -180,7 +180,6 @@ export interface TelemetryState {
     setupLoading: boolean;
     showSetupView: boolean;
     activeChartCategory: ChartCategory;
-    engineerMode: boolean;
 
     // Actions
     setSpeedUnit: (unit: 'kmh' | 'mph') => void;
@@ -224,7 +223,6 @@ export interface TelemetryState {
     setMaximizedSidebarMode: (mode: 'hud' | 'data_sources') => void; // NEW
     setShowMiniMap: (show: boolean) => void; // NEW
     setActiveChartCategory: (category: ChartCategory) => void;
-    setEngineerMode: (enabled: boolean) => void;
     setIsMapTransitioning: (is: boolean) => void;
     setIsGlobalTransitioning: (is: boolean) => void;
 
@@ -289,7 +287,6 @@ export interface ChartPreset {
 }
 
 export type ChartCategory = 'Driver' | 'Tyres' | 'Dynamics' | 'Handling' | 'Systems' | 'TyresPro' | 'Aero' | 'Chassis';
-export const ENGINEER_CATEGORIES: ChartCategory[] = ['TyresPro', 'Aero', 'Chassis'];
 
 export const CATEGORY_CHART_CONFIGS: Record<ChartCategory, ChartConfig[]> = {
     Driver: DEFAULT_CHARTS,
@@ -361,6 +358,27 @@ export const CATEGORY_CHART_CONFIGS: Record<ChartCategory, ChartConfig[]> = {
         { id: 'Susp Force', alias: 'Susp Force RL', color: '#60a5fa', visible: false, order: 10, height: 140, unit: 'N', wheelIndex: 2 },
         { id: 'Susp Force', alias: 'Susp Force RR', color: '#f87171', visible: false, order: 11, height: 140, unit: 'N', wheelIndex: 3 },
     ],
+};
+
+// Virtual chart channels are computed in TelemetryChart from other fused channels;
+// map them to the source channels that must exist for the chart to render anything.
+const VIRTUAL_CHART_SOURCES: Record<string, string[]> = {
+    'Time Delta':            [],   // computed from the reference lap
+    'TireHeat':              ['TyresTempInside', 'TyresTempCentre', 'TyresTempOutside'],
+    'SuspPosFront':          ['Susp Pos'],
+    'SuspPosRear':           ['Susp Pos'],
+    'RideHeights':           ['FrontRideHeight'],
+    'ThirdDeflectionMerged': ['Front3rdDeflection'],
+    'HandlingMerged':        ['G Force Lat', 'Ground Speed'],
+    'Yaw Rate':              ['G Force Lat', 'Ground Speed'],
+};
+
+/** True if the session contains the channel(s) this chart needs (avoids empty frames). */
+export const chartHasData = (channelId: string, telemetryData: Record<string, any> | null): boolean => {
+    if (!telemetryData) return false;
+    const sources = VIRTUAL_CHART_SOURCES[channelId];
+    if (sources) return sources.every(s => telemetryData[s] !== undefined);
+    return telemetryData[channelId] !== undefined;
 };
 
 const SUSPENSION_MERGED_CONFIGS: ChartConfig[] = [
@@ -639,7 +657,6 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     setupLoading: false,
     showSetupView: false,
     activeChartCategory: 'Driver',
-    engineerMode: localStorage.getItem('engineer_mode') === 'true',
 
     setShowCarSelection: (val) => set({ showCarSelection: val }),
     setCustomCarMapping: (rawCarName, modelName) => {
@@ -949,14 +966,6 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     },
     setIsMapTransitioning: (is) => set({ isMapTransitioning: is }),
     setIsGlobalTransitioning: (is) => set({ isGlobalTransitioning: is }),
-    setEngineerMode: (enabled) => {
-        localStorage.setItem('engineer_mode', String(enabled));
-        set({ engineerMode: enabled });
-        // If turning off and current category is an engineer tab, fall back to Driver
-        if (!enabled && ENGINEER_CATEGORIES.includes(get().activeChartCategory)) {
-            get().setActiveChartCategory('Driver');
-        }
-    },
     setActiveChartCategory: (category) => {
         set({ activeChartCategory: category });
 

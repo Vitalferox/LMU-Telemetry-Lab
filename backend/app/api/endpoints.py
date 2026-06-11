@@ -196,17 +196,14 @@ async def validate_system_path(path: str = Query(...)):
     return {"exists": os.path.exists(os.path.normpath(path))}
 
 
-@router.get("/system/detect-lmu-path")
-async def detect_lmu_path():
+def _find_lmu_telemetry_dir() -> Optional[str]:
     """
     Auto-detect the LMU UserData/Telemetry folder by scanning common Steam library locations.
-    Returns the first found path, or null if none found.
+    Returns the first found path, or None.
     """
     import string
 
     LMU_SUBPATH = os.path.join("steamapps", "common", "Le Mans Ultimate", "UserData", "Telemetry")
-
-    candidates: list[str] = []
 
     # 1. Read Steam libraryfolders.vdf to find all configured Steam libraries
     steam_roots: list[str] = []
@@ -234,17 +231,23 @@ async def detect_lmu_path():
             if os.path.isdir(p):
                 steam_roots.append(p)
 
-    # 3. Build candidate list
+    # 3. Return first existing candidate
     for root in steam_roots:
-        candidates.append(os.path.join(root, LMU_SUBPATH))
+        p = os.path.normpath(os.path.join(root, LMU_SUBPATH))
+        if os.path.isdir(p):
+            return p
 
-    # 4. Return first existing path
-    for p in candidates:
-        np = os.path.normpath(p)
-        if os.path.isdir(np):
-            return {"path": np, "found": True}
+    return None
 
-    return {"path": None, "found": False}
+
+@router.get("/system/detect-lmu-path")
+async def detect_lmu_path():
+    """
+    Auto-detect the LMU UserData/Telemetry folder by scanning common Steam library locations.
+    Returns the first found path, or null if none found.
+    """
+    p = _find_lmu_telemetry_dir()
+    return {"path": p, "found": p is not None}
 
 @router.post("/system/open-path")
 async def open_system_path(req: OpenPathRequest):
@@ -549,6 +552,203 @@ async def import_ld_directory(req: LdImportRequest):
         "errors": errors,
         "message": f"{len(converted)} converted, {len(skipped)} skipped, {len(errors)} errors",
     }
+
+
+def _parse_native_session_name(fname: str):
+    """Parse '{Track}_{P|Q|R}_{ISO}.duckdb' → (track, letter, datetime) or None."""
+    import re as _re
+    m = _re.match(r"^(.+)_([PQR])_(\d{4}-\d{2}-\d{2})T(\d{2})_(\d{2})_(\d{2})Z?\.duckdb$", fname)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(f"{m.group(3)} {m.group(4)}:{m.group(5)}:{m.group(6)}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return m.group(1), m.group(2), dt
+
+
+def _parse_ld_session_name(fname: str):
+    """Parse 'YYYY-MM-DD - HH-MM-SS - {Track} - {P|Q|R}N.ld' → (track, letter, datetime) or None."""
+    import re as _re
+    m = _re.match(r"^(\d{4}-\d{2}-\d{2}) - (\d{2})-(\d{2})-(\d{2}) - (.+) - ([PQR])\d*\.ld$", fname, _re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return m.group(5), m.group(6).upper(), dt
+
+
+def _session_times_match(dt_a: datetime, dt_b: datetime, tol_s: float = 180.0) -> bool:
+    """
+    True if the two timestamps refer to the same instant modulo a whole-(half-)hour
+    timezone offset (.ld filenames use local time, native .duckdb names use UTC).
+    """
+    delta = abs((dt_a - dt_b).total_seconds())
+    if delta > 15 * 3600:   # beyond any real timezone offset
+        return False
+    return abs(delta - round(delta / 1800.0) * 1800.0) <= tol_s
+
+
+def _clear_session_cache(cache_dir: str, session_id: str):
+    if os.path.exists(cache_dir):
+        for cache_file in glob.glob(os.path.join(cache_dir, f"{session_id}*.parquet")):
+            try:
+                os.remove(cache_file)
+            except Exception as e:
+                logger.warning(f"Failed to delete cache file {cache_file}: {e}")
+
+
+class LmuSyncRequest(BaseModel):
+    profile_id: Optional[str] = "guest"
+    telemetry_dir: Optional[str] = None   # default: auto-detect
+
+
+@router.post("/sessions/sync-lmu")
+async def sync_lmu_sessions(req: LmuSyncRequest):
+    """
+    One-shot sync with the game folders:
+      1. Import new native .duckdb sessions from <LMU>/UserData/Telemetry.
+      2. For each DAMPlugin .ld in <LMU>/LOG, find the imported native session it
+         belongs to (same track + recording time modulo timezone) and merge its
+         extra channels into it. Unmatched .ld files are imported standalone.
+
+    Idempotent: already-imported sessions and already-merged .ld files are skipped.
+    """
+    from ..services.ld_converter import convert_ld_to_duckdb, merge_extra_channels
+
+    telemetry_dir = req.telemetry_dir or _find_lmu_telemetry_dir()
+    if not telemetry_dir or not os.path.isdir(telemetry_dir):
+        raise HTTPException(status_code=404, detail="LMU Telemetry folder not found")
+    telemetry_dir = os.path.normpath(telemetry_dir)
+    # <LMU>/UserData/Telemetry → <LMU>/LOG
+    lmu_root = os.path.dirname(os.path.dirname(telemetry_dir))
+    log_dir = os.path.join(lmu_root, "LOG")
+
+    data_dir, cache_dir = get_contextual_dirs(req.profile_id)
+
+    imported, merged, skipped, errors = [], [], [], []
+
+    # ── 1. Import new native .duckdb sessions ───────────────────────────────
+    existing_db = {f.lower() for f in os.listdir(data_dir) if f.lower().endswith(".duckdb")}
+    for fname in sorted(f for f in os.listdir(telemetry_dir) if f.lower().endswith(".duckdb")):
+        if fname.lower() in existing_db:
+            skipped.append({"file": fname, "reason": "already imported"})
+            continue
+        try:
+            shutil.copy2(os.path.join(telemetry_dir, fname), os.path.join(data_dir, fname))
+            existing_db.add(fname.lower())
+            imported.append({"file": fname, "id": fname})
+            logger.info(f"Sync: imported native {fname}")
+        except Exception as e:
+            logger.error(f"Sync: failed to copy {fname}: {e}", exc_info=True)
+            errors.append({"file": fname, "error": str(e)})
+
+    # ── 2. Index imported sessions by (track, letter, time) ─────────────────
+    native_index = []
+    for fname in os.listdir(data_dir):
+        if not fname.lower().endswith(".duckdb"):
+            continue
+        parsed = _parse_native_session_name(fname)
+        if parsed:
+            native_index.append((parsed[0], parsed[1], parsed[2], fname))
+
+    def _already_merged(db_path: str) -> bool:
+        try:
+            con = duckdb.connect(db_path, read_only=True)
+            try:
+                rows = con.execute("SELECT value FROM metadata WHERE key = 'DAMPluginMerged'").fetchall()
+                return bool(rows)
+            finally:
+                con.close()
+        except Exception:
+            return False
+
+    # ── 3. Process DAMPlugin .ld files (game LOG dir + the given dir itself) ──
+    ld_entries: dict[str, str] = {}
+    for src_dir in (log_dir, telemetry_dir):
+        if os.path.isdir(src_dir):
+            for f in os.listdir(src_dir):
+                if f.lower().endswith(".ld") and f not in ld_entries:
+                    ld_entries[f] = os.path.join(src_dir, f)
+
+    tmp_path = os.path.join(data_dir, "_tmp_ld_sync.duckdb")
+    for fname in sorted(ld_entries):
+        ld_path = ld_entries[fname]
+        parsed = _parse_ld_session_name(fname)
+
+        # Find the native session this .ld belongs to
+        target = None
+        if parsed:
+            track, letter, dt = parsed
+            t = track.lower()
+            candidates = [
+                (abs((dt - n_dt).total_seconds()), n_file)
+                for n_track, n_letter, n_dt, n_file in native_index
+                if (n_track.lower() == t or t in n_track.lower() or n_track.lower() in t)
+                and n_letter == letter and _session_times_match(dt, n_dt)
+            ]
+            if candidates:
+                target = min(candidates)[1]
+
+        try:
+            if target:
+                target_path = os.path.join(data_dir, target)
+                if _already_merged(target_path):
+                    skipped.append({"file": fname, "reason": f"already merged into {target}"})
+                    continue
+                info = convert_ld_to_duckdb(ld_path, tmp_path)
+                try:
+                    res = merge_extra_channels(target_path, tmp_path, source_name=fname)
+                    _clear_session_cache(cache_dir, target)
+                    merged.append({"file": fname, "into": target, "channels": len(res["merged"])})
+                    logger.info(f"Sync: merged {fname} → {target} ({len(res['merged'])} tables)")
+                except ValueError as ve:
+                    # Lap times don't line up: not the same session after all → standalone import
+                    logger.warning(f"Sync: merge rejected for {fname} ({ve}), importing standalone")
+                    db_name = _canonical_db_name(info)
+                    dest = os.path.join(data_dir, db_name)
+                    if db_name.lower() in existing_db or os.path.exists(dest):
+                        skipped.append({"file": fname, "reason": "already imported"})
+                    else:
+                        os.replace(tmp_path, dest)
+                        existing_db.add(db_name.lower())
+                        imported.append({"file": fname, "id": db_name})
+            else:
+                # No matching native session: legacy standalone import (dedup by canonical name)
+                legacy_name = os.path.splitext(fname)[0] + ".duckdb"
+                if legacy_name.lower() in existing_db:
+                    skipped.append({"file": fname, "reason": "already imported"})
+                    continue
+                info = convert_ld_to_duckdb(ld_path, tmp_path)
+                db_name = _canonical_db_name(info)
+                dest = os.path.join(data_dir, db_name)
+                if db_name.lower() in existing_db or os.path.exists(dest):
+                    skipped.append({"file": fname, "reason": "already imported"})
+                else:
+                    os.replace(tmp_path, dest)
+                    existing_db.add(db_name.lower())
+                    imported.append({"file": fname, "id": db_name})
+                    logger.info(f"Sync: imported standalone .ld {fname} → {db_name}")
+        except Exception as e:
+            logger.error(f"Sync: failed on {fname}: {e}", exc_info=True)
+            errors.append({"file": fname, "error": str(e)})
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    return {
+        "imported": imported,
+        "merged": merged,
+        "skipped": skipped,
+        "errors": errors,
+        "message": f"{len(imported)} imported, {len(merged)} merged, {len(skipped)} skipped, {len(errors)} errors",
+    }
+
 
 @router.get("/sessions")
 async def list_sessions(profile_id: Optional[str] = Query("guest")):

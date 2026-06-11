@@ -278,9 +278,9 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
         setIsImporting(true);
         setImportMessage(null);
         try {
-            const result = await apiClient.importLdFolder(telemetryPath, activeProfileId);
+            const result = await apiClient.syncLmuSessions(activeProfileId, telemetryPath);
             await fetchSessions();
-            if (result.converted.length > 0) {
+            if (result.imported.length > 0 || result.merged.length > 0) {
                 setImportMessage(`✓ ${result.message}`);
                 setTimeout(() => {
                     const freshSessions = useTelemetryStore.getState().sessions;
