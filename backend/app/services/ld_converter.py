@@ -226,9 +226,13 @@ _SINGLE_MAP: list[tuple[str, str]] = [
     ("Battery Charge Level",   "SoC"),
     ("Virtual Energy",         "Virtual Energy"),
     ("Regen Rate",             "Regen Rate"),
-    ("Motor Temp",             "Engine Water Temp"),       # fallback if motor
+    ("Motor Temp",             "MotorTemp"),
+    ("Motor RPM",              "MotorRPM"),
+    ("Motor Torque",           "MotorTorque"),
+    ("Motor State",            "MotorState"),
+    ("Motor Water Temp",       "MotorWaterTemp"),
     ("Brake Bias Rear",        "Brake Bias Rear"),
-    ("Drag",                   "Brakes Force"),             # closest available
+    ("Drag",                   "Drag"),
     ("Cloud Darkness",         "CloudDarkness"),
     ("Yellow Flag State",      "Yellow Flag State"),
     ("Speed Limiter On",       "Speed Limiter"),
@@ -254,6 +258,20 @@ _SINGLE_MAP: list[tuple[str, str]] = [
     ("Sector Flag 1",          "Sector1 Flag"),
     ("Sector Flag 2",          "Sector2 Flag"),
     ("Sector Flag 3",          "Sector3 Flag"),
+    # DAMPlugin extra channels — single value
+    ("Body Pitch",             "BodyPitch"),
+    ("Body Roll",              "BodyRoll"),
+    ("Front Downforce",        "DownforceFront"),
+    ("Rear Downforce",         "DownforceRear"),
+    ("Delta Best",             "DeltaBest"),
+    ("Engine Torque",          "EngineTorque"),
+    ("Front Wing Height",      "FrontWingHeight"),
+    ("Local Rotation X",       "BodyRotX"),
+    ("Local Rotation Y",       "BodyRotY"),
+    ("Local Rotation Z",       "BodyRotZ"),
+    ("Local Rot Accel X",      "BodyRotAccelX"),
+    ("Local Rot Accel Y",      "BodyRotAccelY"),
+    ("Local Rot Accel Z",      "BodyRotAccelZ"),
 ]
 
 # Post-decode scale factors for specific multi-wheel channels (applied after Formula A).
@@ -271,13 +289,24 @@ _MULTI_MAP: list[tuple[str, str, list[str]]] = [
     ("Tyre Temp {w} Inner",  "TyresTempLeft",   ["FL", "FR", "RL", "RR"]),
     ("Tyre Temp {w} Outer",  "TyresTempRight",  ["FL", "FR", "RL", "RR"]),
     ("Tyre Carcass Temp", "TyresCarcassTemp",   ["FL", "FR", "RL", "RR"]),
-    ("Tyre Rubber Temp {w} C", "TyresRubberTemp", ["FL", "FR", "RL", "RR"]),
+    ("Tyre Rubber Temp {w} C", "TyresRubberTemp",       ["FL", "FR", "RL", "RR"]),
+    ("Tyre Rubber Temp {w} I", "TyresRubberTempInner",  ["FL", "FR", "RL", "RR"]),
+    ("Tyre Rubber Temp {w} O", "TyresRubberTempOuter",  ["FL", "FR", "RL", "RR"]),
     ("Tyre Wear",         "Tyres Wear",         ["FL", "FR", "RL", "RR"]),
     ("Wheel Rot Speed",   "Wheel Speed",        ["FL", "FR", "RL", "RR"]),
     ("Wheel Detached",    "WheelsDetached",     ["FL", "FR", "RL", "RR"]),
     ("Ride Height",       "RideHeights",        ["FL", "FR", "RL", "RR"]),
     ("Susp Force",        "Susp Force",         ["FL", "FR", "RL", "RR"]),
     ("Surface Type",      "SurfaceTypes",       ["FL", "FR", "RL", "RR"]),
+    # DAMPlugin extra channels — multi-wheel
+    ("Camber",                 "CamberDyn",           ["FL", "FR", "RL", "RR"]),
+    ("Toe",                    "ToeDyn",              ["FL", "FR", "RL", "RR"]),
+    ("Tyre Load",              "TyreLoad",            ["FL", "FR", "RL", "RR"]),
+    ("Grip Fract",             "GripFract",           ["FL", "FR", "RL", "RR"]),
+    ("Lat Force",              "TyreLatForce",        ["FL", "FR", "RL", "RR"]),
+    ("Long Force",             "TyreLongForce",       ["FL", "FR", "RL", "RR"]),
+    ("Vertical Tyre Deflection", "VertTyreDeflection", ["FL", "FR", "RL", "RR"]),
+    ("Brake Pressure",         "BrakePressure",       ["FL", "FR", "RL", "RR"]),
 ]
 
 # Event channels extracted directly from .ld (by monitoring state changes)
