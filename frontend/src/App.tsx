@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { MapTransitionOverlay } from './components/MapTransitionOverlay';
-import { useTelemetryStore, CATEGORY_CHART_CONFIGS } from './store/telemetryStore';
+import { useTelemetryStore, CATEGORY_CHART_CONFIGS, ENGINEER_CATEGORIES } from './store/telemetryStore';
 import { FileManager } from './components/FileManager';
 import { TelemetryChart } from './components/TelemetryChart';
 import { TrackMap } from './components/TrackMap';
@@ -306,6 +306,7 @@ function App() {
   const cursorIndex = useTelemetryStore(state => state.cursorIndex);
   const setActiveChartCategory = useTelemetryStore(state => state.setActiveChartCategory);
   const activeChartCategory = useTelemetryStore(state => state.activeChartCategory);
+  const engineerMode = useTelemetryStore(state => state.engineerMode);
   const referenceCursorIndex = useTelemetryStore(state => state.referenceCursorIndex);
   const referenceDeltaIndex = useTelemetryStore(state => state.referenceDeltaIndex);
   const liveDeltaStore = useTelemetryStore(state => state.liveDelta);
@@ -1183,9 +1184,13 @@ function App() {
                                 { id: 'Dynamics', label: 'DYNAMICS' },
                                 { id: 'Handling', label: 'HANDLING' },
                                 { id: 'Systems', label: 'SYSTEMS' },
+                                { id: 'TyresPro', label: 'TYRES PRO' },
+                                { id: 'Aero', label: 'AERO' },
+                                { id: 'Chassis', label: 'CHASSIS' },
                               ].filter(cat => {
                                 if (cat.id === 'Driver') return true;
                                 if (!telemetryData) return false;
+                                if (ENGINEER_CATEGORIES.includes(cat.id as any) && !engineerMode) return false;
                                 const configs = CATEGORY_CHART_CONFIGS[cat.id as any];
                                 return configs?.some(c => telemetryData[c.id] !== undefined);
                               });

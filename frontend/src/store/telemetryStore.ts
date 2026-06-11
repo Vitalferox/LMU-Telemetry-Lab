@@ -180,6 +180,7 @@ export interface TelemetryState {
     setupLoading: boolean;
     showSetupView: boolean;
     activeChartCategory: ChartCategory;
+    engineerMode: boolean;
 
     // Actions
     setSpeedUnit: (unit: 'kmh' | 'mph') => void;
@@ -223,6 +224,7 @@ export interface TelemetryState {
     setMaximizedSidebarMode: (mode: 'hud' | 'data_sources') => void; // NEW
     setShowMiniMap: (show: boolean) => void; // NEW
     setActiveChartCategory: (category: ChartCategory) => void;
+    setEngineerMode: (enabled: boolean) => void;
     setIsMapTransitioning: (is: boolean) => void;
     setIsGlobalTransitioning: (is: boolean) => void;
 
@@ -286,7 +288,8 @@ export interface ChartPreset {
     configs: ChartConfig[];
 }
 
-export type ChartCategory = 'Driver' | 'Tyres' | 'Dynamics' | 'Handling' | 'Systems';
+export type ChartCategory = 'Driver' | 'Tyres' | 'Dynamics' | 'Handling' | 'Systems' | 'TyresPro' | 'Aero' | 'Chassis';
+export const ENGINEER_CATEGORIES: ChartCategory[] = ['TyresPro', 'Aero', 'Chassis'];
 
 export const CATEGORY_CHART_CONFIGS: Record<ChartCategory, ChartConfig[]> = {
     Driver: DEFAULT_CHARTS,
@@ -319,7 +322,45 @@ export const CATEGORY_CHART_CONFIGS: Record<ChartCategory, ChartConfig[]> = {
         { id: 'ABS', alias: 'ABS Active', color: '#38bdf8', visible: true, order: 1, height: 120 },
         { id: 'SoC', alias: 'Hybrid SoC', color: '#10b981', visible: true, order: 2, height: 120, unit: 'MJ' },
         { id: 'Fuel Level', alias: 'Fuel Level', color: '#facc15', visible: true, order: 3, height: 120, unit: 'L' },
-    ]
+    ],
+    // Engineer Mode tabs (DAMPlugin channels)
+    TyresPro: [
+        { id: 'TyreLoad', alias: 'Tyre Load FL', color: '#3b82f6', visible: true, order: 0, height: 140, unit: 'N', wheelIndex: 0 },
+        { id: 'TyreLoad', alias: 'Tyre Load FR', color: '#ef4444', visible: true, order: 1, height: 140, unit: 'N', wheelIndex: 1 },
+        { id: 'TyreLoad', alias: 'Tyre Load RL', color: '#60a5fa', visible: true, order: 2, height: 140, unit: 'N', wheelIndex: 2 },
+        { id: 'TyreLoad', alias: 'Tyre Load RR', color: '#f87171', visible: true, order: 3, height: 140, unit: 'N', wheelIndex: 3 },
+        { id: 'GripFract', alias: 'Grip Fract FL', color: '#3b82f6', visible: true, order: 4, height: 120, unit: '%', wheelIndex: 0 },
+        { id: 'GripFract', alias: 'Grip Fract FR', color: '#ef4444', visible: true, order: 5, height: 120, unit: '%', wheelIndex: 1 },
+        { id: 'GripFract', alias: 'Grip Fract RL', color: '#60a5fa', visible: true, order: 6, height: 120, unit: '%', wheelIndex: 2 },
+        { id: 'GripFract', alias: 'Grip Fract RR', color: '#f87171', visible: true, order: 7, height: 120, unit: '%', wheelIndex: 3 },
+        { id: 'TyresRubberTempInner', alias: 'Rubber Temp Inner FL', color: '#3b82f6', visible: false, order: 8, height: 120, unit: '°C', wheelIndex: 0 },
+        { id: 'TyresRubberTempInner', alias: 'Rubber Temp Inner FR', color: '#ef4444', visible: false, order: 9, height: 120, unit: '°C', wheelIndex: 1 },
+        { id: 'TyresRubberTempOuter', alias: 'Rubber Temp Outer FL', color: '#93c5fd', visible: false, order: 10, height: 120, unit: '°C', wheelIndex: 0 },
+        { id: 'TyresRubberTempOuter', alias: 'Rubber Temp Outer FR', color: '#fca5a5', visible: false, order: 11, height: 120, unit: '°C', wheelIndex: 1 },
+    ],
+    Aero: [
+        { id: 'DownforceFront', alias: 'Front Downforce', color: '#22d3ee', visible: true, order: 0, height: 140, unit: 'N' },
+        { id: 'DownforceRear', alias: 'Rear Downforce', color: '#fb923c', visible: true, order: 1, height: 140, unit: 'N' },
+        { id: 'Drag', alias: 'Drag', color: '#f43f5e', visible: true, order: 2, height: 120, unit: 'N' },
+        { id: 'RideHeights', alias: 'Ride Heights (F/R)', color: '#00aaff', visible: true, order: 3, height: 160, unit: 'mm' },
+        { id: 'FrontWingHeight', alias: 'Front Wing Height', color: '#a78bfa', visible: true, order: 4, height: 100, unit: 'mm' },
+        { id: 'VertTyreDeflection', alias: 'Tyre Deflection FL', color: '#3b82f6', visible: false, order: 5, height: 120, unit: 'mm', wheelIndex: 0 },
+        { id: 'VertTyreDeflection', alias: 'Tyre Deflection FR', color: '#ef4444', visible: false, order: 6, height: 120, unit: 'mm', wheelIndex: 1 },
+    ],
+    Chassis: [
+        { id: 'CamberDyn', alias: 'Camber FL', color: '#3b82f6', visible: true, order: 0, height: 120, unit: 'rad', wheelIndex: 0 },
+        { id: 'CamberDyn', alias: 'Camber FR', color: '#ef4444', visible: true, order: 1, height: 120, unit: 'rad', wheelIndex: 1 },
+        { id: 'CamberDyn', alias: 'Camber RL', color: '#60a5fa', visible: true, order: 2, height: 120, unit: 'rad', wheelIndex: 2 },
+        { id: 'CamberDyn', alias: 'Camber RR', color: '#f87171', visible: true, order: 3, height: 120, unit: 'rad', wheelIndex: 3 },
+        { id: 'ToeDyn', alias: 'Toe FL', color: '#3b82f6', visible: true, order: 4, height: 120, unit: 'rad', wheelIndex: 0 },
+        { id: 'ToeDyn', alias: 'Toe FR', color: '#ef4444', visible: true, order: 5, height: 120, unit: 'rad', wheelIndex: 1 },
+        { id: 'BodyPitch', alias: 'Body Pitch', color: '#f59e0b', visible: true, order: 6, height: 120, unit: 'rad' },
+        { id: 'BodyRoll', alias: 'Body Roll', color: '#10b981', visible: true, order: 7, height: 120, unit: 'rad' },
+        { id: 'Susp Force', alias: 'Susp Force FL', color: '#3b82f6', visible: false, order: 8, height: 140, unit: 'N', wheelIndex: 0 },
+        { id: 'Susp Force', alias: 'Susp Force FR', color: '#ef4444', visible: false, order: 9, height: 140, unit: 'N', wheelIndex: 1 },
+        { id: 'Susp Force', alias: 'Susp Force RL', color: '#60a5fa', visible: false, order: 10, height: 140, unit: 'N', wheelIndex: 2 },
+        { id: 'Susp Force', alias: 'Susp Force RR', color: '#f87171', visible: false, order: 11, height: 140, unit: 'N', wheelIndex: 3 },
+    ],
 };
 
 const SUSPENSION_MERGED_CONFIGS: ChartConfig[] = [
@@ -598,6 +639,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     setupLoading: false,
     showSetupView: false,
     activeChartCategory: 'Driver',
+    engineerMode: localStorage.getItem('engineer_mode') === 'true',
 
     setShowCarSelection: (val) => set({ showCarSelection: val }),
     setCustomCarMapping: (rawCarName, modelName) => {
@@ -907,6 +949,14 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     },
     setIsMapTransitioning: (is) => set({ isMapTransitioning: is }),
     setIsGlobalTransitioning: (is) => set({ isGlobalTransitioning: is }),
+    setEngineerMode: (enabled) => {
+        localStorage.setItem('engineer_mode', String(enabled));
+        set({ engineerMode: enabled });
+        // If turning off and current category is an engineer tab, fall back to Driver
+        if (!enabled && ENGINEER_CATEGORIES.includes(get().activeChartCategory)) {
+            get().setActiveChartCategory('Driver');
+        }
+    },
     setActiveChartCategory: (category) => {
         set({ activeChartCategory: category });
 
