@@ -21,6 +21,7 @@ import { F1Dashboard } from './components/F1Dashboard';
 import { Tooltip } from './components/ui/Tooltip';
 import { Lab3DRoot } from './components/Lab3D/Lab3DRoot';
 import { UpdateNotifier } from './components/UpdateNotifier';
+import { TrackMapPopout } from './components/TrackMapPopout';
 import { CarSetupView } from './components/CarSetupView';
 import { apiClient } from './api/client';
 import {
@@ -334,6 +335,7 @@ function App() {
   const setRightPanelCollapsed = useTelemetryStore(state => state.setRightPanelCollapsed);
   const isMapMaximized = useTelemetryStore(state => state.isMapMaximized);
   const setIsMapMaximized = useTelemetryStore(state => state.setIsMapMaximized);
+  const isTrackMapPoppedOut = useTelemetryStore(state => state.isTrackMapPoppedOut);
   const isMapTransitioning = useTelemetryStore(state => state.isMapTransitioning);
   const isGlobalTransitioning = useTelemetryStore(state => state.isGlobalTransitioning);
   const setIsMapTransitioning = useTelemetryStore(state => state.setIsMapTransitioning);
@@ -1130,7 +1132,7 @@ function App() {
 
               {selectedLapIdx !== null ? (
                 <div className="flex flex-col flex-1 h-full">
-                  {shouldRenderExpandedMap && (
+                  {shouldRenderExpandedMap && !isTrackMapPoppedOut && (
                     <div
                       className={`flex flex-col relative flex-shrink-0 origin-top overflow-hidden min-h-0 ${isMapMaximized ? 'fixed inset-0 z-[2000] p-0' : 'px-4 p-2'} ${(isDraggingExpandedMap || isMapMaximized) ? '' : 'transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)]'}`}
                       style={{
@@ -1347,7 +1349,11 @@ function App() {
                           transition: isResizingTrackMap ? 'none' : undefined
                         }}
                       >
-                        {shouldRenderSidebarMap && (
+                        {isTrackMapPoppedOut ? (
+                          <div className="flex-1 flex items-center justify-center py-4">
+                            <span className="text-gray-600 text-[11px] font-semibold uppercase tracking-widest">Map in external window</span>
+                          </div>
+                        ) : shouldRenderSidebarMap && (
                           <>
                             <div className="flex-1 relative min-h-0 overflow-hidden">
                               {/* Loading Overlay for Sidebar Map Transitions */}
@@ -1666,6 +1672,7 @@ function App() {
           <ReferenceLapBrowser onClose={() => setShowReferenceBrowser(false)} />
         )}
         <UpdateNotifier />
+        <TrackMapPopout />
         <AnimatePresence>
           {showSetupView && (
             <motion.div 

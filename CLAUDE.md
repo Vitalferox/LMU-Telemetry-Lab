@@ -58,6 +58,10 @@ Plan : [PLAN_PHASE_MODE_AVANCE.md](PLAN_PHASE_MODE_AVANCE.md). Référence canau
 1. Étape 1 du plan : endpoints `GET /system/damplugin/status` / activate / deactivate + bannière « plugin supprimé par MAJ jeu » (moins urgent, plugin actif).
 2. Le coach IA exploitera ces canaux (ex. analyse carrossage via température rubber I/C/O).
 
+## Pop-out Track Map ✅ (fait le 2026-06-13)
+
+Bouton « POP OUT » dans la barre de la map (2D et 3D) → fenêtre navigateur séparée (`TrackMapPopout.tsx` : React root indépendant + store Zustand partagé, donc synchro totale playback/cursor/tours). La map disparaît de l'app principale pendant le pop-out (graphiques plein écran, placeholder « Map in external window » dans la sidebar) et revient à la fermeture. La prop `isPopout` sur TrackMap/TrackMap3D active les overlays du mode maximisé (DataCharts à droite, Analysis Laps/Track/Car Info à gauche, toggle Dist/Time, menu HUD SETUP). **Piège corrigé** : uPlot testait `container instanceof HTMLElement` — échec cross-realm pour un élément du document pop-up → crash silencieux qui démontait tout le root (fenêtre noire) ; remplacé par le callback `(u, init)` dans TelemetryChart.tsx. Debug : erreurs du pop-up relayées via `onUncaughtError` + buffer `window.__popoutLogs` (dev). Voir mémoire [[project-trackmap-popout]].
+
 ## Briques réutilisables de l'ancien projet `F:\Claude Code\LMU Setup`
 
 - `src/lmu_ri/svm_parser.py` — parseur setups .svm (pour le coach IA)

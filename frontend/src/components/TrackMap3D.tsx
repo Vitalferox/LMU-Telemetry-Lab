@@ -4,7 +4,7 @@ import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Text, PerspectiveCamera, Float, Stars, Bounds, Center, Line, Edges, Billboard } from '@react-three/drei';
 import * as THREE from 'three';
 import { useTelemetryStore } from '../store/telemetryStore';
-import { Layers, MousePointer2, Move3d, RotateCcw, Play, Pause, Compass, Target, Navigation, Maximize2, Minimize2, Activity, ChevronRight, Check, ChevronDown } from 'lucide-react';
+import { Layers, MousePointer2, Move3d, RotateCcw, Play, Pause, Compass, Target, Navigation, Maximize2, Minimize2, Activity, ChevronRight, Check, ChevronDown, ExternalLink } from 'lucide-react';
 import { handleGlassMouseMove } from '../utils/glassEffect';
 import { Tooltip } from './ui/Tooltip';
 import { TrackMap } from './TrackMap';
@@ -746,7 +746,7 @@ const SectorBoundaries = ({ trackSectors, zScale, trackPoints }: { trackSectors:
     );
 };
 
-export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleExpand?: () => void, isAnimating?: boolean }) => {
+export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = false }: { onToggleExpand?: () => void, isAnimating?: boolean, isPopout?: boolean }) => {
     const track3DData = useTelemetryStore(state => state.track3DData);
     const referenceTrack3DData = useTelemetryStore(state => state.referenceTrack3DData);
     const staticTrackBaseData = useTelemetryStore(state => state.staticTrackBaseData);
@@ -783,6 +783,8 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
     }, []);
 
     const isMapMaximized = useTelemetryStore(state => state.isMapMaximized);
+    // Popout window behaves like maximized mode for HUD overlays (charts, analysis laps, etc.)
+    const hudMaximized = isMapMaximized || isPopout;
 
     // Force re-measure on dimension change to fix the "stale compression" bug
     useEffect(() => {
@@ -841,6 +843,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
     const editHudMode = useTelemetryStore(state => state.editHudMode);
     const resetHudConfigs = useTelemetryStore(state => state.resetHudConfigs);
     const setIsMapMaximized = useTelemetryStore(state => state.setIsMapMaximized);
+    const setTrackMapPoppedOut = useTelemetryStore(state => state.setTrackMapPoppedOut);
     const maximizedSidebarMode = useTelemetryStore(state => state.maximizedSidebarMode);
     const setMaximizedSidebarMode = useTelemetryStore(state => state.setMaximizedSidebarMode);
     const singleLapXAxisMode = useTelemetryStore(state => state.singleLapXAxisMode);
@@ -1154,23 +1157,23 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
     return (
         <div
             ref={containerRef}
-            className={`h-full flex flex-col min-h-[inherit] relative group/map transition-all duration-300 glass-container-flat hover:scale-100 overflow-hidden ${isMapMaximized ? 'rounded-none glass-no-blur' : 'rounded-2xl'}`}
+            className={`h-full flex flex-col min-h-[inherit] relative group/map transition-all duration-300 glass-container-flat hover:scale-100 overflow-hidden ${hudMaximized ? 'rounded-none glass-no-blur' : 'rounded-2xl'}`}
             onMouseMove={handleGlassMouseMove}
             style={{ '--glass-hover-scale': '1', '--glass-content-scale': '1' } as any}
         >
             {/* Fills the 5px expansion gap when hovered out with the 3D map's identical dark carbon background */}
-            <div className={`glass-sync-bg bg-[#181a1d] ${isMapMaximized ? 'rounded-none' : 'rounded-[2rem]'} z-0`} />
+            <div className={`glass-sync-bg bg-[#181a1d] ${hudMaximized ? 'rounded-none' : 'rounded-[2rem]'} z-0`} />
 
             <div className="glass-content flex-1 flex flex-col relative z-10 w-full h-full">
 
                 {/* Title & Z-Scale Overlay */}
-                <div className={`absolute top-5 left-5 z-[200] flex pointer-events-auto transition-all duration-300 ${isMapMaximized ? 'flex-row items-center gap-6' : 'flex-col items-start gap-1'}`}>
+                <div className={`absolute top-5 left-5 z-[200] flex pointer-events-auto transition-all duration-300 ${hudMaximized ? 'flex-row items-center gap-6' : 'flex-col items-start gap-1'}`}>
                     <h3 className="text-gray-500 text-[12px] font-black uppercase tracking-[0.2em] drop-shadow-md transition-all duration-300 group-hover/map:text-white group-hover/map:drop-shadow-[0_0_10px_rgba(255,255,255,0.8)] cursor-default">
                         3D Track Map
                     </h3>
 
                     {/* Z-Scale Horizontal Slider */}
-                    <div className={`flex items-center gap-3 h-4 ${isMapMaximized ? 'pl-4 border-l border-white/10' : ''}`} onMouseDown={(e) => e.stopPropagation()}>
+                    <div className={`flex items-center gap-3 h-4 ${hudMaximized ? 'pl-4 border-l border-white/10' : ''}`} onMouseDown={(e) => e.stopPropagation()}>
                         <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">Z Scale</span>
                         <div className="relative flex items-center h-4">
                             <input
@@ -1215,7 +1218,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
                         </div>
 
                         {/* Maximized Dimension Toggle */}
-                        {isMapMaximized && (
+                        {hudMaximized && (
                             <MaximizedDimensionToggle />
                         )}
                     </div>
@@ -1255,15 +1258,15 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
                         {(() => {
                             const baseWidth = dimensions.width || (containerRef.current?.clientWidth) || (window.innerWidth - 360);
                             const maxPadding = Math.min(380, baseWidth * 0.28);
-                            const leftPadding = isMapMaximized
+                            const leftPadding = hudMaximized
                                 ? ((hudVisibility.analysisLaps || maximizedSidebarMode === 'data_sources') ? maxPadding : 20)
                                 : 20;
-                            const rightPadding = (isMapMaximized && hudVisibility.dataCharts) ? maxPadding : 20;
+                            const rightPadding = (hudMaximized && hudVisibility.dataCharts) ? maxPadding : 20;
                             const barWidth = Math.min(896, Math.max(320, baseWidth - (leftPadding + rightPadding)));
 
                             return (
                                 <motion.div
-                                    className={`mx-auto px-4 w-fit pointer-events-auto ${isMapMaximized && maximizedSidebarMode === 'data_sources' ? 'opacity-50 pointer-events-none' : ''}`}
+                                    className={`mx-auto px-4 w-fit pointer-events-auto ${hudMaximized && maximizedSidebarMode === 'data_sources' ? 'opacity-50 pointer-events-none' : ''}`}
                                     onMouseEnter={() => setIsBarHovered(true)}
                                     onMouseLeave={() => setIsBarHovered(false)}
                                     initial="hidden"
@@ -1377,23 +1380,23 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
 
                                                         {/* 2. HUD Setup */}
                                                         <div className="relative" ref={hudMenuRef}>
-                                                            <Tooltip text={isMapMaximized ? "HUD SETUP" : "OVERLAP"} position="top">
+                                                            <Tooltip text={hudMaximized ? "HUD SETUP" : "OVERLAP"} position="top">
                                                                 <button
                                                                     onClick={() => {
-                                                                        if (isMapMaximized) setShowHudMenu(!showHudMenu);
+                                                                        if (hudMaximized) setShowHudMenu(!showHudMenu);
                                                                         else setShowTelemetryOverlay(!showTelemetryOverlay);
                                                                     }}
                                                                     className={`transition-all rounded-lg glass-container hover:scale-110 active:scale-95 border border-transparent ${showHudMenu ? 'text-blue-400 bg-blue-500/10 border-blue-500/20 shadow-[0_0_15px_rgba(37,99,235,0.1)]' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
                                                                 >
                                                                     <div className="glass-content px-2.5 py-1.5 flex items-center justify-center gap-1.5">
                                                                         <Activity size={16} />
-                                                                        {isMapMaximized && <ChevronDown size={12} className={`transition-transform duration-300 ${showHudMenu ? 'rotate-180' : ''}`} />}
+                                                                        {hudMaximized && <ChevronDown size={12} className={`transition-transform duration-300 ${showHudMenu ? 'rotate-180' : ''}`} />}
                                                                     </div>
                                                                 </button>
                                                             </Tooltip>
 
                                                             <AnimatePresence>
-                                                                {isMapMaximized && showHudMenu && (
+                                                                {hudMaximized && showHudMenu && (
                                                                     <motion.div
                                                                         initial={{ opacity: 0, scale: 0.95, y: 10 }}
                                                                         animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -1456,15 +1459,27 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
                                                     </>
                                                 )}
 
-                                                {/* 5. Maximize/Restore - ALWAYS VISIBLE */}
-                                                <Tooltip text={isMapMaximized ? "RESTORE" : "MAXIMIZE"} position="top">
+                                                {/* 5. Pop Out / Return to App */}
+                                                <Tooltip text={isPopout ? "RETURN TO APP" : "POP OUT"} position="top">
                                                     <button
-                                                        onClick={() => setIsMapMaximized(!isMapMaximized)}
-                                                        className={`p-2 rounded-full transition-all border border-transparent ${isMapMaximized ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
+                                                        onClick={() => setTrackMapPoppedOut(!isPopout)}
+                                                        className={`p-2 rounded-lg transition-all border border-transparent ${isPopout ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
                                                     >
-                                                        {isMapMaximized ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+                                                        <ExternalLink size={16} />
                                                     </button>
                                                 </Tooltip>
+
+                                                {/* 6. Maximize/Restore - hidden in popout window */}
+                                                {!isPopout && (
+                                                    <Tooltip text={isMapMaximized ? "RESTORE" : "MAXIMIZE"} position="top">
+                                                        <button
+                                                            onClick={() => setIsMapMaximized(!isMapMaximized)}
+                                                            className={`p-2 rounded-full transition-all border border-transparent ${isMapMaximized ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
+                                                        >
+                                                            {isMapMaximized ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+                                                        </button>
+                                                    </Tooltip>
+                                                )}
                                             </div>
                                         </div>
                                     </motion.div>
@@ -1570,7 +1585,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
                 {/* 1. Telemetry Overlap HUD */}
                 {!isAnimating && (
                     <div
-                        className={`absolute inset-0 pointer-events-none transition-all duration-500 transform z-[150] ${(isMapMaximized ? hudVisibility.overlap : showTelemetryOverlay)
+                        className={`absolute inset-0 pointer-events-none transition-all duration-500 transform z-[150] ${(hudMaximized ? hudVisibility.overlap : showTelemetryOverlay)
                             ? 'opacity-100 scale-100 translate-y-0'
                             : 'opacity-0 scale-95 -translate-y-4 pointer-events-none'
                             }`}
@@ -1596,7 +1611,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
                 )}
 
                 {/* 2. Smart Sidebar */}
-                {isMapMaximized && !isAnimating && (
+                {hudMaximized && !isAnimating && (
                     <div 
                         className={`absolute top-12 left-4 z-[200] w-[320px] flex flex-col gap-0 isolate ${maximizedSidebarMode === 'data_sources' ? 'bottom-4' : 'pointer-events-none'}`}
                         onMouseMove={(e) => e.stopPropagation()}
@@ -1705,7 +1720,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
 
                 {/* 4. Distance/Time Sync Toggle (Dynamic Positioning) */}
                 <AnimatePresence>
-                    {isMapMaximized && !isAnimating && (
+                    {hudMaximized && !isAnimating && (
                         <motion.div
                             initial={{ opacity: 0, x: 20 }}
                             animate={{
@@ -1742,7 +1757,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false }: { onToggleEx
 
                 {/* 5. Data Charts (Right Sidebar) */}
                 <AnimatePresence>
-                    {isMapMaximized && hudVisibility.dataCharts && !isAnimating && (
+                    {hudMaximized && hudVisibility.dataCharts && !isAnimating && (
                         <motion.div
                             key="data-charts-sidebar-3d"
                             initial={{ opacity: 0, x: 40 }}

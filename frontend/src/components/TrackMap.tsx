@@ -12,7 +12,7 @@ import { DataChartsOverlay } from './DataChartsOverlay';
 import { MaximizedDimensionToggle } from './MaximizedDimensionToggle';
 import { FileManager } from './FileManager';
 
-import { Maximize2, Minimize2, Play, Pause, RotateCcw, Compass, Navigation, ZoomIn, ZoomOut, Activity, ChevronRight, Check, ChevronDown } from 'lucide-react';
+import { Maximize2, Minimize2, Play, Pause, RotateCcw, Compass, Navigation, ZoomIn, ZoomOut, Activity, ChevronRight, Check, ChevronDown, ExternalLink } from 'lucide-react';
 
 const STICKY_THRESHOLD = 0.05;
 
@@ -75,6 +75,7 @@ interface TrackMapProps {
     allowRotation?: boolean; // NEW
     forcedRotation?: number; // Prop to sync rotation
     isAnimating?: boolean;   // Prop to skip rotation recalibration
+    isPopout?: boolean;      // Rendered in the popout window (HUD behaves like maximized)
 }
 
 const formatLapTime = (time: number) => {
@@ -85,7 +86,7 @@ const formatLapTime = (time: number) => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
 };
 
-export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false, allowRotation = true, forcedRotation, isAnimating = false }: TrackMapProps) => {
+export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false, allowRotation = true, forcedRotation, isAnimating = false, isPopout = false }: TrackMapProps) => {
     const telemetryData = useTelemetryStore(state => state.telemetryData);
     const referenceTelemetryData = useTelemetryStore(state => state.referenceTelemetryData);
     const selectedStint = useTelemetryStore(state => state.selectedStint);
@@ -120,6 +121,8 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
     const setHudVisibility = useTelemetryStore(state => state.setHudVisibility);
     const isMapMaximized = useTelemetryStore(state => state.isMapMaximized);
     const setIsMapMaximized = useTelemetryStore(state => state.setIsMapMaximized);
+    // Popout window behaves like maximized mode for HUD overlays (charts, analysis laps, etc.)
+    const hudMaximized = isMapMaximized || isPopout;
     const maximizedSidebarMode = useTelemetryStore(state => state.maximizedSidebarMode);
     const setMaximizedSidebarMode = useTelemetryStore(state => state.setMaximizedSidebarMode);
     const singleLapXAxisMode = useTelemetryStore(state => state.singleLapXAxisMode);
@@ -147,6 +150,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
     const [isBarHovered, setIsBarHovered] = useState(false);
     const showMiniMap = useTelemetryStore(state => state.showMiniMap);
     const setShowMiniMap = useTelemetryStore(state => state.setShowMiniMap);
+    const setTrackMapPoppedOut = useTelemetryStore(state => state.setTrackMapPoppedOut);
 
     // Load Checkered Flag Icon
     useEffect(() => {
@@ -1416,10 +1420,10 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                             width: (() => {
                                 const baseWidth = dimensions.width;
                                 const maxPadding = Math.min(380, baseWidth * 0.28);
-                                const leftPadding = isMapMaximized
+                                const leftPadding = hudMaximized
                                     ? ((hudVisibility.analysisLaps || maximizedSidebarMode === 'data_sources') ? maxPadding : 20)
                                     : 20;
-                                const rightPadding = (isMapMaximized && hudVisibility.dataCharts) ? maxPadding : 20;
+                                const rightPadding = (hudMaximized && hudVisibility.dataCharts) ? maxPadding : 20;
                                 const effectiveWidth = baseWidth - (leftPadding + rightPadding);
                                 return isExpanded ? Math.min(896, Math.max(320, effectiveWidth)) : undefined;
                             })()
@@ -1489,7 +1493,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-3 pl-4 border-l border-white/10">
-                                        {(dimensions.width - (isMapMaximized ? 680 : 40)) > 600 && (
+                                        {(dimensions.width - (hudMaximized ? 680 : 40)) > 600 && (
                                             <>
                                                 <Tooltip text="MINIMAP" position="top">
                                                     <button onClick={() => setShowMiniMap(!showMiniMap)} className={`transition-all rounded-lg glass-container hover:scale-110 active:scale-95 border border-transparent ${showMiniMap ? 'text-blue-400 bg-blue-500/10 border-blue-500/20 shadow-[0_0_15px_rgba(37,99,235,0.1)]' : 'text-slate-500 hover:text-white hover:bg-white/5'}`} onMouseMove={handleGlassMouseMove}>
@@ -1497,12 +1501,12 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                                                     </button>
                                                 </Tooltip>
                                                 <div className="relative" ref={hudMenuRef}>
-                                                    <Tooltip text={isMapMaximized ? "HUD SETUP" : "OVERLAP"} position="top">
-                                                        <button onClick={() => isMapMaximized ? setShowHudMenu(!showHudMenu) : setShowTelemetryOverlay(!showTelemetryOverlay)} className={`transition-all rounded-lg glass-container hover:scale-110 active:scale-95 border border-transparent ${showTelemetryOverlay ? 'text-blue-400 bg-blue-500/10 border-blue-500/20 shadow-[0_0_15px_rgba(37,99,235,0.1)]' : 'text-slate-500 hover:text-white hover:bg-white/5'}`} onMouseMove={handleGlassMouseMove}>
-                                                            <div className="glass-content px-2.5 py-1.5 flex items-center justify-center gap-1.5"><Activity size={16} />{isMapMaximized && <ChevronDown size={12} className={`transition-transform duration-300 ${showHudMenu ? 'rotate-180' : ''}`} />}</div>
+                                                    <Tooltip text={hudMaximized ? "HUD SETUP" : "OVERLAP"} position="top">
+                                                        <button onClick={() => hudMaximized ? setShowHudMenu(!showHudMenu) : setShowTelemetryOverlay(!showTelemetryOverlay)} className={`transition-all rounded-lg glass-container hover:scale-110 active:scale-95 border border-transparent ${showTelemetryOverlay ? 'text-blue-400 bg-blue-500/10 border-blue-500/20 shadow-[0_0_15px_rgba(37,99,235,0.1)]' : 'text-slate-500 hover:text-white hover:bg-white/5'}`} onMouseMove={handleGlassMouseMove}>
+                                                            <div className="glass-content px-2.5 py-1.5 flex items-center justify-center gap-1.5"><Activity size={16} />{hudMaximized && <ChevronDown size={12} className={`transition-transform duration-300 ${showHudMenu ? 'rotate-180' : ''}`} />}</div>
                                                         </button>
                                                     </Tooltip>
-                                                    <div className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-40 transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] origin-bottom z-[1100] ${isMapMaximized && showHudMenu ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 translate-y-2 pointer-events-none'}`}>
+                                                    <div className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-40 transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] origin-bottom z-[1100] ${hudMaximized && showHudMenu ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 translate-y-2 pointer-events-none'}`}>
                                                         <div className="flex flex-col gap-1 p-1 bg-[#1a1a1e]/90 glass-container rounded-xl border border-white/10" onMouseMove={handleGlassMouseMove}>
                                                             <div className="glass-content w-full h-full flex flex-col gap-0.5">
                                                                 <button onClick={() => setHudVisibility('overlap', !hudVisibility.overlap)} className={`w-full flex items-center justify-between px-3 py-1.5 rounded-lg transition-all border hover:scale-105 active:scale-90 group ${hudVisibility.overlap ? 'bg-blue-600/30 text-blue-400 border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.15)]' : 'text-slate-500 border-transparent hover:bg-white/5 hover:text-white'}`}><span className="text-[11px] font-bold">Telemetry Overlap</span></button>
@@ -1537,9 +1541,14 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                                                 <button onClick={onToggleExpand} className="transition-all rounded-lg glass-container hover:scale-110 active:scale-95 text-slate-500 hover:text-white border border-transparent hover:bg-white/5" onMouseMove={handleGlassMouseMove}><div className="glass-content px-2.5 py-1.5 flex items-center justify-center"><ChevronRight size={16} /></div></button>
                                             </Tooltip>
                                         )}
-                                        <Tooltip text={isMapMaximized ? "RESTORE" : "MAXIMIZE"} position="top">
-                                            <button onClick={() => setIsMapMaximized(!isMapMaximized)} className={`transition-all rounded-full glass-container hover:scale-110 active:scale-95 border border-transparent ml-1 ${isMapMaximized ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(59,130,246,0.3)]' : 'text-slate-500 hover:text-white hover:bg-white/5'}`} onMouseMove={handleGlassMouseMove}><div className="glass-content p-2.5 flex items-center justify-center">{isMapMaximized ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</div></button>
+                                        <Tooltip text={isPopout ? "RETURN TO APP" : "POP OUT"} position="top">
+                                            <button onClick={() => setTrackMapPoppedOut(!isPopout)} className={`transition-all rounded-lg glass-container hover:scale-110 active:scale-95 border border-transparent ${isPopout ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white hover:bg-white/5'}`} onMouseMove={handleGlassMouseMove}><div className="glass-content px-2.5 py-1.5 flex items-center justify-center"><ExternalLink size={16} /></div></button>
                                         </Tooltip>
+                                        {!isPopout && (
+                                            <Tooltip text={isMapMaximized ? "RESTORE" : "MAXIMIZE"} position="top">
+                                                <button onClick={() => setIsMapMaximized(!isMapMaximized)} className={`transition-all rounded-full glass-container hover:scale-110 active:scale-95 border border-transparent ml-1 ${isMapMaximized ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(59,130,246,0.3)]' : 'text-slate-500 hover:text-white hover:bg-white/5'}`} onMouseMove={handleGlassMouseMove}><div className="glass-content p-2.5 flex items-center justify-center">{isMapMaximized ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</div></button>
+                                            </Tooltip>
+                                        )}
                                     </div>
                                 </>
                             ) : (
@@ -1556,12 +1565,12 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                 </motion.div>
             </div>
         );
-    }, [isExpanded, isBarHovered, isPlaying, playbackSpeed, playbackProgress, showMiniMap, showHudMenu, showTelemetryOverlay, isMapMaximized, hudVisibility, maximizedSidebarMode, dimensions.width, telemetryData, isMiniMap, togglePlayback, setPlaybackSpeed, setPlaybackProgress, setShowMiniMap, setShowHudMenu, setShowTelemetryOverlay, setHudVisibility, fitTrack, cameraMode, setCameraMode, setIsMapMaximized, onToggleExpand, isSingleLap, singleLapXAxisMode, dashboardSyncMode]);
+    }, [isExpanded, isBarHovered, isPlaying, playbackSpeed, playbackProgress, showMiniMap, showHudMenu, showTelemetryOverlay, isMapMaximized, hudVisibility, maximizedSidebarMode, dimensions.width, telemetryData, isMiniMap, togglePlayback, setPlaybackSpeed, setPlaybackProgress, setShowMiniMap, setShowHudMenu, setShowTelemetryOverlay, setHudVisibility, fitTrack, cameraMode, setCameraMode, setIsMapMaximized, setTrackMapPoppedOut, onToggleExpand, isSingleLap, singleLapXAxisMode, dashboardSyncMode]);
 
     return (
         <div ref={containerRef}
             onMouseMove={handleGlassMouseMove}
-            className={`h-full flex flex-col min-h-[inherit] relative group/map transition-all duration-300 ${isMiniMap ? '' : 'glass-container-flat map-bg-unified'} hover:scale-100 overflow-hidden ${isMiniMap ? 'rounded-xl' : (isMapMaximized ? 'rounded-none glass-no-blur' : 'rounded-2xl')}`}
+            className={`h-full flex flex-col min-h-[inherit] relative group/map transition-all duration-300 ${isMiniMap ? '' : 'glass-container-flat map-bg-unified'} hover:scale-100 overflow-hidden ${isMiniMap ? 'rounded-xl' : (hudMaximized ? 'rounded-none glass-no-blur' : 'rounded-2xl')}`}
             style={{ 
                 '--glass-hover-scale': '1', 
                 '--glass-content-scale': '1'
@@ -1655,7 +1664,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                     <>
                         {/* 1. Telemetry Overlap */}
                         <div
-                            className={`absolute inset-0 pointer-events-none transition-all duration-500 transform z-[150] ${(isMapMaximized ? hudVisibility.overlap : showTelemetryOverlay)
+                            className={`absolute inset-0 pointer-events-none transition-all duration-500 transform z-[150] ${(hudMaximized ? hudVisibility.overlap : showTelemetryOverlay)
                                 ? 'opacity-100 scale-100 translate-y-0'
                                 : 'opacity-0 scale-95 -translate-y-4 pointer-events-none'
                                 }`}
@@ -1680,7 +1689,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                         </div>
 
                         {/* 2. Smart Sidebar */}
-                        {isMapMaximized && (
+                        {hudMaximized && (
                             <div 
                                 className={`absolute top-10 left-4 z-[200] w-[320px] flex flex-col gap-0 isolate ${maximizedSidebarMode === 'data_sources' ? 'bottom-4' : 'pointer-events-none'}`}
                                 onMouseMove={(e) => e.stopPropagation()}
@@ -1786,7 +1795,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
 
                         {/* 3. Distance/Time Sync Toggle (Dynamic Positioning) */}
                         <AnimatePresence>
-                            {isMapMaximized && (
+                            {hudMaximized && (
                                 <motion.div
                                     initial={{ opacity: 0, x: 20 }}
                                     animate={{
@@ -1823,7 +1832,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
 
                         {/* 4. Data Charts (Right Sidebar) */}
                         <AnimatePresence>
-                            {isMapMaximized && hudVisibility.dataCharts && (
+                            {hudMaximized && hudVisibility.dataCharts && (
                                 <motion.div
                                     key="data-charts-sidebar"
                                     initial={{ opacity: 0, x: 40 }}

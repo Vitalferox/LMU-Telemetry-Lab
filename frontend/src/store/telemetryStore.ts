@@ -167,6 +167,7 @@ export interface TelemetryState {
     showReferenceBrowser: boolean;
     maximizedSidebarMode: 'hud' | 'data_sources'; // NEW: For navigating within maximized sidebar
     showMiniMap: boolean; // NEW
+    isTrackMapPoppedOut: boolean;
     isUserInteractingWithCharts: boolean; // NEW: Track if user is clicking/dragging charts
     isHudAnimating: boolean; // NEW: To suppress avoidance during transitions
     isMapTransitioning: boolean; // NEW: Global state for map animations
@@ -222,6 +223,7 @@ export interface TelemetryState {
     setIsMapMaximized: (is: boolean) => void;
     setMaximizedSidebarMode: (mode: 'hud' | 'data_sources') => void; // NEW
     setShowMiniMap: (show: boolean) => void; // NEW
+    setTrackMapPoppedOut: (is: boolean) => void;
     setActiveChartCategory: (category: ChartCategory) => void;
     setIsMapTransitioning: (is: boolean) => void;
     setIsGlobalTransitioning: (is: boolean) => void;
@@ -638,6 +640,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     parentDimensions: { width: 1920, height: 1080 },
     maximizedSidebarMode: 'hud',
     showMiniMap: localStorage.getItem('show_minimap') !== 'false',
+    isTrackMapPoppedOut: false,
     isUserInteractingWithCharts: false,
     isHudAnimating: false,
     isMapTransitioning: false,
@@ -964,6 +967,13 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         localStorage.setItem('show_minimap', String(show));
         set({ showMiniMap: show });
     },
+    setTrackMapPoppedOut: (is) => set((state) => ({
+        isTrackMapPoppedOut: is,
+        ...(is ? {
+            isMapMaximized: false,
+            hudVisibility: { ...state.hudVisibility, dataCharts: true, analysisLaps: true },
+        } : {}),
+    })),
     setIsMapTransitioning: (is) => set({ isMapTransitioning: is }),
     setIsGlobalTransitioning: (is) => set({ isGlobalTransitioning: is }),
     setActiveChartCategory: (category) => {

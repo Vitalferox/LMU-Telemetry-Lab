@@ -1197,7 +1197,13 @@ export const TelemetryChart: React.FC<TelemetryChartProps> = ({
             }
         };
 
-        uplotRef.current = new uPlot(opts, data as any, chartRef.current);
+        // Callback form instead of passing the element: uPlot's `instanceof HTMLElement`
+        // check fails cross-realm when the chart lives in the popout window
+        const chartTarget = chartRef.current;
+        uplotRef.current = new uPlot(opts, data as any, (u: uPlot, init: () => void) => {
+            chartTarget.appendChild(u.root);
+            init();
+        });
 
         // Add click listener to jump playback on chart click (ignoring drag and double-click)
         const over = uplotRef.current.over;
