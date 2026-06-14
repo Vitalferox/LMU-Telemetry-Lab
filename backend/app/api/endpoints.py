@@ -196,16 +196,12 @@ async def validate_system_path(path: str = Query(...)):
     return {"exists": os.path.exists(os.path.normpath(path))}
 
 
-def _find_lmu_telemetry_dir() -> Optional[str]:
-    """
-    Auto-detect the LMU UserData/Telemetry folder by scanning common Steam library locations.
-    Returns the first found path, or None.
-    """
+def _find_lmu_root() -> Optional[str]:
+    """Auto-detect the LMU install root by scanning Steam library locations."""
     import string
 
-    LMU_SUBPATH = os.path.join("steamapps", "common", "Le Mans Ultimate", "UserData", "Telemetry")
+    LMU_SUBPATH = os.path.join("steamapps", "common", "Le Mans Ultimate")
 
-    # 1. Read Steam libraryfolders.vdf to find all configured Steam libraries
     steam_roots: list[str] = []
     default_steam = r"C:\Program Files (x86)\Steam"
     if os.path.isdir(default_steam):
@@ -216,7 +212,6 @@ def _find_lmu_telemetry_dir() -> Optional[str]:
         try:
             content = open(vdf_path, encoding="utf-8", errors="replace").read()
             import re as _re
-            # VDF format: "path"  "D:\\SteamLibrary"
             for m in _re.finditer(r'"path"\s+"([^"]+)"', content):
                 p = m.group(1).replace("\\\\", "\\")
                 if os.path.isdir(p):
@@ -224,19 +219,27 @@ def _find_lmu_telemetry_dir() -> Optional[str]:
         except Exception:
             pass
 
-    # 2. Also scan all drive letters for common SteamLibrary folder names
     for drive in string.ascii_uppercase:
         for lib_name in ("SteamLibrary", "Steam", "Games", "SteamGames"):
             p = f"{drive}:\\{lib_name}"
             if os.path.isdir(p):
                 steam_roots.append(p)
 
-    # 3. Return first existing candidate
     for root in steam_roots:
         p = os.path.normpath(os.path.join(root, LMU_SUBPATH))
         if os.path.isdir(p):
             return p
 
+    return None
+
+
+def _find_lmu_telemetry_dir() -> Optional[str]:
+    """Auto-detect the LMU UserData/Telemetry folder."""
+    lmu = _find_lmu_root()
+    if lmu:
+        p = os.path.join(lmu, "UserData", "Telemetry")
+        if os.path.isdir(p):
+            return os.path.normpath(p)
     return None
 
 
@@ -248,6 +251,54 @@ async def detect_lmu_path():
     """
     p = _find_lmu_telemetry_dir()
     return {"path": p, "found": p is not None}
+
+@router.get("/system/damplugin/status")
+async def damplugin_status():
+    """Check whether the DAMPlugin is installed in the LMU game folder."""
+    from ..services import dam_plugin
+    from pathlib import Path
+
+    lmu = _find_lmu_root()
+    if not lmu:
+        return {"error": "LMU installation not found", "installed": False, "assets_available": False}
+    return dam_plugin.status(Path(lmu))
+
+
+@router.post("/system/damplugin/activate")
+async def damplugin_activate():
+    """Install DAMPlugin into the LMU game folder."""
+    from ..services import dam_plugin
+    from pathlib import Path
+
+    lmu = _find_lmu_root()
+    if not lmu:
+        raise HTTPException(status_code=404, detail="LMU installation not found")
+    try:
+        dam_plugin.activate(Path(lmu))
+        return dam_plugin.status(Path(lmu))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"DAMPlugin activation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/system/damplugin/deactivate")
+async def damplugin_deactivate():
+    """Remove DAMPlugin from the LMU game folder."""
+    from ..services import dam_plugin
+    from pathlib import Path
+
+    lmu = _find_lmu_root()
+    if not lmu:
+        raise HTTPException(status_code=404, detail="LMU installation not found")
+    try:
+        dam_plugin.deactivate(Path(lmu))
+        return dam_plugin.status(Path(lmu))
+    except Exception as e:
+        logger.error(f"DAMPlugin deactivation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/system/open-path")
 async def open_system_path(req: OpenPathRequest):

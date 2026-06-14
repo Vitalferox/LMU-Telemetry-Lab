@@ -346,6 +346,37 @@ export const apiClient = {
         return res.json();
     },
 
+    async getDamPluginStatus(): Promise<{
+        installed: boolean;
+        ini_present: boolean;
+        plugin_data_present: boolean;
+        enabled_in_json: boolean;
+        assets_available: boolean;
+        lmu_root: string;
+        error?: string;
+    }> {
+        const res = await fetch(`${API_BASE}/system/damplugin/status`);
+        return res.json();
+    },
+
+    async activateDamPlugin(): Promise<any> {
+        const res = await fetch(`${API_BASE}/system/damplugin/activate`, { method: 'POST' });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Activation failed' }));
+            throw new Error(err.detail || 'Activation failed');
+        }
+        return res.json();
+    },
+
+    async deactivateDamPlugin(): Promise<any> {
+        const res = await fetch(`${API_BASE}/system/damplugin/deactivate`, { method: 'POST' });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Deactivation failed' }));
+            throw new Error(err.detail || 'Deactivation failed');
+        }
+        return res.json();
+    },
+
     async _fetchJson(path: string, options: RequestInit = {}): Promise<any> {
         const res = await fetch(`${API_BASE}${path}`, options);
         if (!res.ok) {
