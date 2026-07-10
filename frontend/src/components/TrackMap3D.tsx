@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { useTelemetryStore } from '../store/telemetryStore';
 import { Layers, MousePointer2, Move3d, RotateCcw, Play, Pause, Compass, Target, Navigation, Maximize2, Minimize2, Activity, ChevronRight, Check, ChevronDown, ExternalLink } from 'lucide-react';
 import { handleGlassMouseMove } from '../utils/glassEffect';
+import { detectCorners, type DetectedCorner } from '../utils/trackHelpers';
 import { Tooltip } from './ui/Tooltip';
 import { TrackMap } from './TrackMap';
 import { CompactTelemetryOverlay } from './CompactTelemetryOverlay';
@@ -746,6 +747,40 @@ const SectorBoundaries = ({ trackSectors, zScale, trackPoints }: { trackSectors:
     );
 };
 
+const CornerLabels = ({ corners, zScale }: { corners: DetectedCorner[], zScale: number }) => {
+    if (!corners || corners.length === 0) return null;
+
+    return (
+        <group>
+            {corners.map(corner => {
+                const nx = -corner.dy;
+                const ny = corner.dx;
+                const sideOffset = 20;
+                const forwardOffset = 5;
+                const textPos = new THREE.Vector3(
+                    corner.x + corner.dx * forwardOffset + nx * sideOffset,
+                    corner.y + corner.dy * forwardOffset + ny * sideOffset,
+                    corner.z * zScale + 6
+                );
+
+                return (
+                    <Billboard key={corner.label} position={textPos} follow lockX={false} lockY={false} lockZ={false}>
+                        <Text
+                            color="#ff8800"
+                            fontSize={8}
+                            anchorX="center"
+                            anchorY="bottom"
+                            fontWeight="bold"
+                        >
+                            {corner.label}
+                        </Text>
+                    </Billboard>
+                );
+            })}
+        </group>
+    );
+};
+
 export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = false }: { onToggleExpand?: () => void, isAnimating?: boolean, isPopout?: boolean }) => {
     const track3DData = useTelemetryStore(state => state.track3DData);
     const referenceTrack3DData = useTelemetryStore(state => state.referenceTrack3DData);
@@ -970,6 +1005,12 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
         // Flip 180 degrees as requested
         return -angleRad + Math.PI;
     }, [track3DData, staticTrackBaseData, trackCenterOffset]);
+
+    const detectedCorners = useMemo(() => {
+        const pts = staticTrackBaseData?.baseMap || track3DData?.baseMap;
+        if (!pts || pts.length < 20) return [];
+        return detectCorners(pts);
+    }, [staticTrackBaseData, track3DData]);
 
     const resetView = useCallback(() => {
         // Trigger reset signal globally
@@ -1528,6 +1569,9 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                                         zScale={zScale}
                                         trackPoints={staticTrackBaseData?.baseMap || track3DData?.baseMap || []}
                                     />
+                                )}
+                                {detectedCorners.length > 0 && (
+                                    <CornerLabels corners={detectedCorners} zScale={zScale} />
                                 )}
                                 {fusedRacingLinePoints && (
                                     <RacingLine

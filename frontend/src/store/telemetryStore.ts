@@ -175,6 +175,12 @@ export interface TelemetryState {
     singleLapXAxisMode: 'distance' | 'time'; // NEW: Independent X-axis mode for single lap
     mapMarkerType: 'arrow' | 'dot'; // NEW: Phase 2 marker selection
 
+    // AI Coach / Race Engineer
+    raceEngineerResult: import('../types').AnalysisResult | null;
+    isAnalyzing: boolean;
+    analysisError: string | null;
+    aiCoachConfigured: boolean | null;
+
     // Car Setup
     carSetupData: CarSetupData | null;
     referenceCarSetupData: CarSetupData | null;
@@ -194,6 +200,11 @@ export interface TelemetryState {
     setRightPanelCollapsed: (collapsed: boolean) => void;
     setSingleLapXAxisMode: (mode: 'distance' | 'time') => void; // NEW
     setMapMarkerType: (type: 'arrow' | 'dot') => void; // NEW
+    analyzeLap: (lapIdx: number, refLapIdx?: number) => Promise<void>;
+    analyzeSession: () => Promise<void>;
+    adviseSetup: (lapIdx?: number) => Promise<void>;
+    clearAnalysis: () => void;
+    checkAiCoachStatus: () => Promise<void>;
     fetchSetup: (sessionId: string) => Promise<void>;
     fetchReferenceSetup: (sessionId: string) => Promise<void>;
     clearReferenceSetup: () => void;
@@ -288,7 +299,7 @@ export interface ChartPreset {
     configs: ChartConfig[];
 }
 
-export type ChartCategory = 'Driver' | 'Tyres' | 'Dynamics' | 'Handling' | 'Systems' | 'TyresPro' | 'Aero' | 'Chassis';
+export type ChartCategory = 'Driver' | 'Tyres' | 'Dynamics' | 'Handling' | 'Systems' | 'TyresPro' | 'Aero' | 'Chassis' | 'RaceEngineer';
 
 export const CATEGORY_CHART_CONFIGS: Record<ChartCategory, ChartConfig[]> = {
     Driver: DEFAULT_CHARTS,
@@ -360,6 +371,7 @@ export const CATEGORY_CHART_CONFIGS: Record<ChartCategory, ChartConfig[]> = {
         { id: 'Susp Force', alias: 'Susp Force RL', color: '#60a5fa', visible: false, order: 10, height: 140, unit: 'N', wheelIndex: 2 },
         { id: 'Susp Force', alias: 'Susp Force RR', color: '#f87171', visible: false, order: 11, height: 140, unit: 'N', wheelIndex: 3 },
     ],
+    RaceEngineer: [],
 };
 
 // Virtual chart channels are computed in TelemetryChart from other fused channels;
@@ -655,6 +667,10 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     slipRatioViewMode: (localStorage.getItem('slip_ratio_view_mode') as 'split' | 'merged') || 'merged',
 
     // Car Setup
+    raceEngineerResult: null,
+    isAnalyzing: false,
+    analysisError: null,
+    aiCoachConfigured: null,
     carSetupData: null,
     referenceCarSetupData: null,
     setupLoading: false,
@@ -733,6 +749,51 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         }
     },
     clearReferenceSetup: () => set({ referenceCarSetupData: null }),
+
+    // ---- AI Coach / Race Engineer ----
+    checkAiCoachStatus: async () => {
+        try {
+            const res = await apiClient.aiCoachStatus();
+            set({ aiCoachConfigured: res.configured });
+        } catch {
+            set({ aiCoachConfigured: false });
+        }
+    },
+    analyzeLap: async (lapIdx, refLapIdx?) => {
+        const sessionId = get().currentSessionId;
+        if (!sessionId) return;
+        set({ isAnalyzing: true, analysisError: null, raceEngineerResult: null });
+        try {
+            const res = await apiClient.analyzeLap(sessionId, lapIdx, refLapIdx, get().activeProfileId || 'guest');
+            set({ raceEngineerResult: res, isAnalyzing: false });
+        } catch (e: any) {
+            set({ analysisError: e.message || 'Analysis failed', isAnalyzing: false });
+        }
+    },
+    analyzeSession: async () => {
+        const sessionId = get().currentSessionId;
+        if (!sessionId) return;
+        set({ isAnalyzing: true, analysisError: null, raceEngineerResult: null });
+        try {
+            const res = await apiClient.analyzeSession(sessionId, get().activeProfileId || 'guest');
+            set({ raceEngineerResult: res, isAnalyzing: false });
+        } catch (e: any) {
+            set({ analysisError: e.message || 'Analysis failed', isAnalyzing: false });
+        }
+    },
+    adviseSetup: async (lapIdx?) => {
+        const sessionId = get().currentSessionId;
+        if (!sessionId) return;
+        set({ isAnalyzing: true, analysisError: null, raceEngineerResult: null });
+        try {
+            const res = await apiClient.adviseSetup(sessionId, lapIdx, get().activeProfileId || 'guest');
+            set({ raceEngineerResult: res, isAnalyzing: false });
+        } catch (e: any) {
+            set({ analysisError: e.message || 'Analysis failed', isAnalyzing: false });
+        }
+    },
+    clearAnalysis: () => set({ raceEngineerResult: null, analysisError: null, isAnalyzing: false }),
+
     exportLap: async (lapNumber) => {
         const sessionId = get().currentSessionId;
         if (!sessionId) return;

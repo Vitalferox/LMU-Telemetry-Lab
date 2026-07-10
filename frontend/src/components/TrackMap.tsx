@@ -4,6 +4,7 @@ import { useTelemetryStore, type TelemetryState } from '../store/telemetryStore'
 import type { Lap, ReferenceLap } from '../types';
 import { Tooltip } from './ui/Tooltip';
 import { handleGlassMouseMove } from '../utils/glassEffect';
+import { detectCorners } from '../utils/trackHelpers';
 import { CompactTelemetryOverlay } from './CompactTelemetryOverlay';
 import { TrackInfoOverlay } from './TrackInfoOverlay';
 import { CarInfoOverlay } from './CarInfoOverlay';
@@ -508,6 +509,11 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         }).sort((a, b) => a.id - b.id);
     }, [trackData?.racingLine, sectorsSource, project]);
 
+    const detectedCorners2D = useMemo(() => {
+        if (!trackData?.referenceTrack?.points || trackData.referenceTrack.points.length < 20) return [];
+        const degM = 111320;
+        return detectCorners(trackData.referenceTrack.points, { mergeDistance: 80 / degM });
+    }, [trackData]);
 
     // 2. Calculate Car Heading from GPS (Smooth window)
     const carHeading = useMemo(() => {
@@ -1065,6 +1071,33 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
             ctx.restore();
         }
 
+        // --- 3.6 Draw Corner Labels ---
+        if (!isMiniMap && detectedCorners2D.length > 0 && trackData) {
+            ctx.save();
+            detectedCorners2D.forEach(corner => {
+                const nx = -corner.dy;
+                const ny = corner.dx;
+                const sideOffset = 20 / effK;
+                const forwardOffset = 5 / effK;
+
+                const textX = corner.x + corner.dx * forwardOffset + nx * sideOffset;
+                const textY = corner.y + corner.dy * forwardOffset + ny * sideOffset;
+
+                ctx.save();
+                ctx.translate(textX, textY);
+                const matrix = ctx.getTransform();
+                ctx.setTransform(1, 0, 0, 1, matrix.e, matrix.f);
+
+                ctx.font = `bold 16px Inter, "Segoe UI", sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = '#ff8800';
+                ctx.fillText(corner.label, 0, 0);
+                ctx.restore();
+            });
+            ctx.restore();
+        }
+
         // --- 4. Draw Start/Finish Flag (Removed, replaced by line above) ---
 
 
@@ -1209,7 +1242,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
 
         ctx.restore();
 
-    }, [trackData, dimensions, view, telemetryData, flagImage, cursorIndex, referenceLapIdx, isMiniMap, cameraMode, followZoom, optimalRotation, smoothCursorIndex, carHeading, isPlaying, forcedRotation, isExpanded, referenceCursorIndex, referenceDeltaIndex, dashboardSyncMode, mapMarkerType, staticTrackBaseData, track3DData, sectorColors, sectorBreakpoints]);
+    }, [trackData, dimensions, view, telemetryData, flagImage, cursorIndex, referenceLapIdx, isMiniMap, cameraMode, followZoom, optimalRotation, smoothCursorIndex, carHeading, isPlaying, forcedRotation, isExpanded, referenceCursorIndex, referenceDeltaIndex, dashboardSyncMode, mapMarkerType, staticTrackBaseData, track3DData, sectorColors, sectorBreakpoints, detectedCorners2D]);
 
     // 4. Cursor rendering in separate effect is no longer needed as we draw it in main loop for synchronization if desired, 
     // but better to keep it separate for performance if cursorIndex changes fast. 

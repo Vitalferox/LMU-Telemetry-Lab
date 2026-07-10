@@ -23,6 +23,7 @@ import { Lab3DRoot } from './components/Lab3D/Lab3DRoot';
 import { UpdateNotifier } from './components/UpdateNotifier';
 import { TrackMapPopout } from './components/TrackMapPopout';
 import { CarSetupView } from './components/CarSetupView';
+import { RaceEngineerTab } from './components/RaceEngineerTab';
 import { apiClient } from './api/client';
 import {
   ArrowLeft,
@@ -1205,8 +1206,9 @@ function App() {
                                 { id: 'TyresPro', label: 'TYRES PRO' },
                                 { id: 'Aero', label: 'AERO' },
                                 { id: 'Chassis', label: 'CHASSIS' },
+                                { id: 'RaceEngineer', label: 'RACE ENGINEER' },
                               ].filter(cat => {
-                                if (cat.id === 'Driver') return true;
+                                if (cat.id === 'Driver' || cat.id === 'RaceEngineer') return true;
                                 if (!telemetryData) return false;
                                 const configs = CATEGORY_CHART_CONFIGS[cat.id as any];
                                 return configs?.some(c => chartHasData(c.id, telemetryData));
@@ -1246,6 +1248,9 @@ function App() {
                         </div>
                       </div>
 
+                      {activeChartCategory === 'RaceEngineer' ? (
+                        <RaceEngineerTab />
+                      ) : (
                       <div className="flex flex-col gap-2 min-w-0">
                         {chartConfigs
                           .filter(c => {
@@ -1278,6 +1283,7 @@ function App() {
                           ))
                         }
                       </div>
+                      )}
                     </div>
                   )}
                 </div>

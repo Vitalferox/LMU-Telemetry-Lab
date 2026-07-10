@@ -3,6 +3,15 @@ import type { Session, Lap, TelemetryData, Profile } from '../types';
 
 const API_BASE = '/api/v1';
 
+function getAuthHeaders(): Record<string, string> {
+    const token = localStorage.getItem('auth_token');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function mergeHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    return { ...getAuthHeaders(), ...extra };
+}
+
 function parseContentDisposition(disposition: string | null, fallback: string): string {
     if (!disposition) return fallback;
     
@@ -34,7 +43,7 @@ function parseContentDisposition(disposition: string | null, fallback: string): 
 export const apiClient = {
     // --- Profile Management ---
     async getProfiles(): Promise<{ profiles: Profile[] }> {
-        const res = await fetch(`${API_BASE}/profiles`);
+        const res = await fetch(`${API_BASE}/profiles`, { headers: getAuthHeaders() });
         if (!res.ok) throw new Error('Failed to fetch profiles');
         return res.json();
     },
@@ -42,7 +51,7 @@ export const apiClient = {
     async createProfile(name: string): Promise<Profile> {
         const res = await fetch(`${API_BASE}/profiles`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: mergeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ name }),
         });
         if (!res.ok) throw new Error('Failed to create profile');
@@ -52,6 +61,7 @@ export const apiClient = {
     async deleteProfile(profileId: string): Promise<void> {
         const res = await fetch(`${API_BASE}/profiles/${profileId}`, {
             method: 'DELETE',
+            headers: getAuthHeaders(),
         });
         if (!res.ok) throw new Error('Failed to delete profile');
     },
@@ -59,7 +69,7 @@ export const apiClient = {
     async updateProfile(profileId: string, name: string): Promise<void> {
         const res = await fetch(`${API_BASE}/profiles/${profileId}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: mergeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ name }),
         });
         if (!res.ok) throw new Error('Failed to update profile');
@@ -70,6 +80,7 @@ export const apiClient = {
         formData.append('file', file);
         const res = await fetch(`${API_BASE}/profiles/${profileId}/avatar`, {
             method: 'POST',
+            headers: getAuthHeaders(),
             body: formData,
         });
         if (!res.ok) throw new Error('Failed to upload avatar');
@@ -79,13 +90,13 @@ export const apiClient = {
 
     // --- Session/Telemetry Management ---
     async getSessions(profileId: string = 'guest'): Promise<{ sessions: Session[] }> {
-        const res = await fetch(`${API_BASE}/sessions?profile_id=${profileId}`);
+        const res = await fetch(`${API_BASE}/sessions?profile_id=${profileId}`, { headers: getAuthHeaders() });
         if (!res.ok) throw new Error('Failed to fetch sessions');
         return res.json();
     },
 
     async getLaps(sessionId: string, profileId: string = 'guest'): Promise<{ laps: Lap[], metadata: import('../types').SessionMetadata }> {
-        const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/laps?profile_id=${profileId}`);
+        const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/laps?profile_id=${profileId}`, { headers: getAuthHeaders() });
         if (!res.ok) throw new Error('Failed to fetch laps');
         return res.json();
     },
@@ -98,7 +109,7 @@ export const apiClient = {
             profile_id: profileId,
             _t: Date.now().toString()
         });
-        const res = await fetch(`${API_BASE}/reference-laps?${params.toString()}`);
+        const res = await fetch(`${API_BASE}/reference-laps?${params.toString()}`, { headers: getAuthHeaders() });
         if (!res.ok) throw new Error('Failed to fetch reference laps');
         return res.json();
     },
@@ -108,7 +119,7 @@ export const apiClient = {
         if (stintId !== undefined) {
             url += `&stint_id=${stintId}`;
         }
-        const res = await fetch(url);
+        const res = await fetch(url, { headers: getAuthHeaders() });
         if (!res.ok) throw new Error('Failed to fetch telemetry');
 
         const contentLength = res.headers.get('content-length');
@@ -146,6 +157,7 @@ export const apiClient = {
         formData.append('file', file);
         const res = await fetch(`${API_BASE}/sessions/upload?profile_id=${profileId}`, {
             method: 'POST',
+            headers: getAuthHeaders(),
             body: formData,
         });
         if (!res.ok) {
@@ -158,7 +170,7 @@ export const apiClient = {
     async renameSession(sessionId: string, newName: string, profileId: string = 'guest'): Promise<void> {
         const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/rename?profile_id=${profileId}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: mergeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ new_name: newName }),
         });
     },
@@ -175,7 +187,7 @@ export const apiClient = {
             url += `&custom_car_model=${encodeURIComponent(customCarModel)}`;
         }
         console.log("[DEBUG] Fetching export SVM URL:", url);
-        const res = await fetch(url);
+        const res = await fetch(url, { headers: getAuthHeaders() });
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: 'Failed to export setup' }));
             throw new Error(err.detail || 'Failed to export setup');
@@ -215,7 +227,7 @@ export const apiClient = {
         if (customCarModel) {
             url += `&custom_car_model=${encodeURIComponent(customCarModel)}`;
         }
-        const res = await fetch(url);
+        const res = await fetch(url, { headers: getAuthHeaders() });
         if (!res.ok) throw new Error('Failed to export lap');
 
         const blob = await res.blob();
@@ -268,20 +280,20 @@ export const apiClient = {
     },
 
     async getSteeringWheels(): Promise<{ categories: Record<string, { name: string, path: string }[]> }> {
-        const res = await fetch(`${API_BASE}/steering-wheels`);
+        const res = await fetch(`${API_BASE}/steering-wheels`, { headers: getAuthHeaders() });
         if (!res.ok) throw new Error('Failed to fetch steering wheels');
         return res.json();
     },
 
     async detectLmuPath(): Promise<string | null> {
-        const res = await fetch(`${API_BASE}/system/detect-lmu-path`);
+        const res = await fetch(`${API_BASE}/system/detect-lmu-path`, { headers: getAuthHeaders() });
         if (!res.ok) return null;
         const data = await res.json();
         return data.found ? data.path : null;
     },
 
     async validatePath(path: string): Promise<boolean> {
-        const res = await fetch(`${API_BASE}/system/validate-path?path=${encodeURIComponent(path)}`);
+        const res = await fetch(`${API_BASE}/system/validate-path?path=${encodeURIComponent(path)}`, { headers: getAuthHeaders() });
         if (!res.ok) return false;
         const data = await res.json();
         return data.exists;
@@ -290,7 +302,7 @@ export const apiClient = {
     async openInExplorer(path: string): Promise<void> {
         await fetch(`${API_BASE}/system/open-path`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: mergeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ path }),
         });
     },
@@ -302,7 +314,7 @@ export const apiClient = {
     ): Promise<{ status: string, id?: string }> {
         const res = await fetch(`${API_BASE}/system/pick-and-upload?profile_id=${profileId}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: mergeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ path, ...bounds }),
         });
         if (!res.ok) throw new Error('Native picker failed');
@@ -318,7 +330,7 @@ export const apiClient = {
     }> {
         const res = await fetch(`${API_BASE}/sessions/sync-lmu`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: mergeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ profile_id: profileId, telemetry_dir: telemetryDir ?? null }),
         });
         if (!res.ok) {
@@ -336,7 +348,7 @@ export const apiClient = {
     }> {
         const res = await fetch(`${API_BASE}/sessions/import-ld`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: mergeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ ld_dir: ldDir, profile_id: profileId }),
         });
         if (!res.ok) {
@@ -355,12 +367,12 @@ export const apiClient = {
         lmu_root: string;
         error?: string;
     }> {
-        const res = await fetch(`${API_BASE}/system/damplugin/status`);
+        const res = await fetch(`${API_BASE}/system/damplugin/status`, { headers: getAuthHeaders() });
         return res.json();
     },
 
     async activateDamPlugin(): Promise<any> {
-        const res = await fetch(`${API_BASE}/system/damplugin/activate`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/system/damplugin/activate`, { method: 'POST', headers: getAuthHeaders() });
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: 'Activation failed' }));
             throw new Error(err.detail || 'Activation failed');
@@ -369,7 +381,7 @@ export const apiClient = {
     },
 
     async deactivateDamPlugin(): Promise<any> {
-        const res = await fetch(`${API_BASE}/system/damplugin/deactivate`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/system/damplugin/deactivate`, { method: 'POST', headers: getAuthHeaders() });
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: 'Deactivation failed' }));
             throw new Error(err.detail || 'Deactivation failed');
@@ -377,8 +389,55 @@ export const apiClient = {
         return res.json();
     },
 
+    // --- AI Coach / Race Engineer ---
+    async aiCoachStatus(): Promise<{ configured: boolean }> {
+        return this._fetchJson('/ai-coach/status');
+    },
+
+    async analyzeLap(
+        sessionId: string, lapIdx: number, referenceLapIdx?: number, profileId: string = 'guest'
+    ): Promise<import('../types').AnalysisResult> {
+        return this._fetchJson(`/ai-coach/${encodeURIComponent(sessionId)}/analyze-lap?profile_id=${profileId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lap_idx: lapIdx, reference_lap_idx: referenceLapIdx ?? null }),
+        });
+    },
+
+    async analyzeSession(
+        sessionId: string, profileId: string = 'guest'
+    ): Promise<import('../types').AnalysisResult> {
+        return this._fetchJson(`/ai-coach/${encodeURIComponent(sessionId)}/analyze-session?profile_id=${profileId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+    },
+
+    async adviseSetup(
+        sessionId: string, lapIdx?: number, profileId: string = 'guest'
+    ): Promise<import('../types').AnalysisResult> {
+        return this._fetchJson(`/ai-coach/${encodeURIComponent(sessionId)}/setup-advice?profile_id=${profileId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lap_idx: lapIdx ?? null }),
+        });
+    },
+
+    async getAiMemory(circuit?: string, car?: string, profileId: string = 'guest'): Promise<{ observations: any[] }> {
+        const params = new URLSearchParams({ profile_id: profileId });
+        if (circuit) params.set('circuit', circuit);
+        if (car) params.set('car', car);
+        return this._fetchJson(`/ai-coach/memory?${params}`);
+    },
+
+    async deleteAiMemory(id: number, profileId: string = 'guest'): Promise<void> {
+        return this._fetchJson(`/ai-coach/memory/${id}?profile_id=${profileId}`, { method: 'DELETE' });
+    },
+
     async _fetchJson(path: string, options: RequestInit = {}): Promise<any> {
-        const res = await fetch(`${API_BASE}${path}`, options);
+        const headers = mergeHeaders(options.headers as Record<string, string> ?? {});
+        const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
         if (!res.ok) {
             const error = await res.json().catch(() => ({ detail: 'Direct Response Error' }));
             const msg = error.detail || `HTTP ${res.status}`;

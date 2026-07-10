@@ -32,17 +32,20 @@ app = FastAPI(title="LMU Telemetry Lab API")
 
 from app.api.endpoints import router as api_router
 from app.services.profiles_service import ProfilesService
+from app.config import get_settings
+from app.security import TokenAuthMiddleware, LocalOnlyGuard
 
-# Configure CORS
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-]
+settings = get_settings()
+logger.info(f"Mode: {settings.APP_MODE} | Auth tokens configured: {len(settings.auth_token_set)} | CORS origins: {settings.cors_origin_list}")
 
+# Security middlewares (outermost runs first)
+app.add_middleware(LocalOnlyGuard)
+app.add_middleware(TokenAuthMiddleware)
+
+# Configure CORS from settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

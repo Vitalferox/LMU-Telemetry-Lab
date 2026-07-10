@@ -105,6 +105,29 @@ export interface ReferenceLap {
     fuelUsed?: number;
 }
 
+// ---- AI Coach / Race Engineer ----
+export interface AnalysisSection {
+    title: string;
+    content: string;
+    severity: 'info' | 'warning' | 'success';
+}
+
+export interface Recommendation {
+    priority: 'P1' | 'P2' | 'P3';
+    action: string;
+    reason: string;
+}
+
+export interface AnalysisResult {
+    summary: string;
+    sections: AnalysisSection[];
+    recommendations: Recommendation[];
+    tokens_in: number;
+    tokens_out: number;
+    cost_eur: number;
+    error?: string | null;
+}
+
 // ---- Car Setup ----
 export interface SetupLREntry { L: string | null; R: string | null; }
 export interface SetupLR3Entry { L: string | null; '3rd': string | null; R: string | null; }

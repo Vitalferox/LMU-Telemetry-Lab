@@ -10,6 +10,8 @@ from datetime import datetime
 from ..services.telemetry_service import TelemetryService
 from ..services.profiles_service import ProfilesService
 from ..services.elevation_service import get_3d_track_data
+from ..security import safe_session_id
+from ..config import get_settings
 import duckdb
 import numpy as np
 from ..utils.track_db import find_track_in_registry
@@ -30,9 +32,10 @@ async def get_3d_track(
     profile_id: Optional[str] = Query("guest")
 ):
     """Get 3D track path (X, Y, Z) for visualization."""
+    session_id = safe_session_id(session_id)
     data_dir, _ = get_contextual_dirs(profile_id)
     db_path = os.path.join(data_dir, session_id)
-    
+
     logger.info(f"API: GET /track3d - Session: {session_id}, Lap: {lap}, Profile: {profile_id}")
     
     if not os.path.exists(db_path):
@@ -143,7 +146,9 @@ ProfilesService.migrate_legacy_data(LEGACY_DATA_DIR)
 
 def get_contextual_dirs(profile_id: Optional[str] = "guest"):
     """Get dynamic data and cache dirs based on profile."""
-    p_id = profile_id or "guest"
+    p_id = os.path.basename(profile_id or "guest")
+    if not p_id or ".." in p_id:
+        raise HTTPException(status_code=400, detail="Invalid profile ID")
     return (
         ProfilesService.get_profile_data_dir(p_id),
         ProfilesService.get_profile_cache_dir(p_id)
@@ -962,6 +967,7 @@ class RenameRequest(BaseModel):
 @router.post("/sessions/{session_id}/rename") # Using POST or PUT
 async def rename_session(session_id: str, request: RenameRequest, profile_id: Optional[str] = Query("guest")):
     """Rename a session file."""
+    session_id = safe_session_id(session_id)
     data_dir, cache_dir = get_contextual_dirs(profile_id)
     old_path = os.path.join(data_dir, session_id)
     if not os.path.exists(old_path):
@@ -996,6 +1002,7 @@ async def rename_session(session_id: str, request: RenameRequest, profile_id: Op
 @router.delete("/sessions/{session_id}")
 def delete_session(session_id: str, profile_id: Optional[str] = Query("guest")):
     """Delete a session file."""
+    session_id = safe_session_id(session_id)
     data_dir, cache_dir = get_contextual_dirs(profile_id)
     file_path = os.path.join(data_dir, session_id)
     if not os.path.exists(file_path):
@@ -1022,9 +1029,9 @@ from ..services.setup_exporter import generate_svm_from_duckdb
 @router.get("/sessions/{session_id}/setup/export")
 async def export_session_setup(session_id: str, request: Request, custom_car_model: Optional[str] = Query(None), profile_id: Optional[str] = Query("guest")):
     """Export car setup data to .svm format."""
+    session_id = safe_session_id(session_id)
     from ..services.car_lookup import get_car_info
 
-    # 優先從 Query Params 中手動提取，防止 FastAPI 自動解析 Race Condition
     q_custom = request.query_params.get("custom_car_model")
     if q_custom:
         custom_car_model = q_custom
@@ -1084,6 +1091,7 @@ async def export_session_setup(session_id: str, request: Request, custom_car_mod
 @router.get("/sessions/{session_id}/setup")
 async def get_session_setup(session_id: str, profile_id: Optional[str] = Query("guest")):
     """Get structured car setup data from a session's DuckDB metadata."""
+    session_id = safe_session_id(session_id)
     data_dir, _ = get_contextual_dirs(profile_id)
     db_path = os.path.join(data_dir, session_id)
     if not os.path.exists(db_path):
@@ -1243,6 +1251,7 @@ async def get_session_setup(session_id: str, profile_id: Optional[str] = Query("
 @router.get("/sessions/{session_id}/laps")
 async def get_session_laps(session_id: str, profile_id: Optional[str] = Query("guest")):
     """Get summary of laps for a session with robust logging."""
+    session_id = safe_session_id(session_id)
     data_dir, _ = get_contextual_dirs(profile_id)
     logger.info(f"API: GET /laps - Profile: {profile_id}, Session: {session_id}")
     db_path = os.path.join(data_dir, session_id)
@@ -1284,6 +1293,7 @@ async def get_telemetry(
     profile_id: Optional[str] = Query("guest")
 ):
     """Get fused telemetry data with robust logging."""
+    session_id = safe_session_id(session_id)
     data_dir, cache_dir = get_contextual_dirs(profile_id)
     logger.info(f"API: GET /telemetry - Profile: {profile_id}, Session: {session_id}, Freq: {freq}, Stint: {stint_id}")
     db_path = os.path.join(data_dir, session_id)
@@ -1432,7 +1442,7 @@ async def get_telemetry(
 @router.get("/sessions/{session_id}/export/lap/{lap_number}")
 async def export_session_lap(session_id: str, lap_number: int, request: Request, custom_car_model: Optional[str] = Query(None), profile_id: Optional[str] = Query("guest")):
     """Export a specific lap as a standalone .duckdb file."""
-    # 優先從 Query Params 中手動提取，防止 FastAPI 自動解析 Race Condition
+    session_id = safe_session_id(session_id)
     q_custom = request.query_params.get("custom_car_model")
     if q_custom:
         custom_car_model = q_custom
@@ -1521,15 +1531,150 @@ async def export_session_lap(session_id: str, lap_number: int, request: Request,
         logger.error(f"Lap export failed for {session_id} Lap {lap_number}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+# ──────────────────────────────────────────────────────────────────────────────
+# AI Coach / Race Engineer
+# ──────────────────────────────────────────────────────────────────────────────
+
+class LapAnalysisRequest(BaseModel):
+    lap_idx: int
+    reference_lap_idx: Optional[int] = None
+
+class SessionAnalysisRequest(BaseModel):
+    pass
+
+class SetupAdviceRequest(BaseModel):
+    lap_idx: Optional[int] = None
+
+
+def _get_coach_service():
+    from ..services.ai_coach.coach_service import CoachService
+    settings = get_settings()
+    return CoachService(settings)
+
+
+@router.get("/ai-coach/status")
+async def ai_coach_status():
+    """Check if the AI coach is configured (API key present)."""
+    service = _get_coach_service()
+    return {"configured": service.check_api_key()}
+
+
+@router.post("/ai-coach/{session_id}/analyze-lap")
+async def ai_coach_analyze_lap(
+    session_id: str,
+    req: LapAnalysisRequest,
+    profile_id: Optional[str] = Query("guest"),
+):
+    session_id = safe_session_id(session_id)
+    data_dir, _ = get_contextual_dirs(profile_id)
+    db_path = os.path.join(data_dir, session_id)
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    service = _get_coach_service()
+    result = service.analyze_lap(
+        db_path=db_path,
+        lap_idx=req.lap_idx,
+        reference_lap_idx=req.reference_lap_idx,
+        data_dir=data_dir,
+        session_id=session_id,
+    )
+    if result.error:
+        raise HTTPException(status_code=500, detail=result.error)
+    return result.to_dict()
+
+
+@router.post("/ai-coach/{session_id}/analyze-session")
+async def ai_coach_analyze_session(
+    session_id: str,
+    profile_id: Optional[str] = Query("guest"),
+):
+    session_id = safe_session_id(session_id)
+    data_dir, _ = get_contextual_dirs(profile_id)
+    db_path = os.path.join(data_dir, session_id)
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    service = _get_coach_service()
+    result = service.analyze_session(
+        db_path=db_path,
+        data_dir=data_dir,
+        session_id=session_id,
+    )
+    if result.error:
+        raise HTTPException(status_code=500, detail=result.error)
+    return result.to_dict()
+
+
+@router.post("/ai-coach/{session_id}/setup-advice")
+async def ai_coach_setup_advice(
+    session_id: str,
+    req: SetupAdviceRequest,
+    profile_id: Optional[str] = Query("guest"),
+):
+    session_id = safe_session_id(session_id)
+    data_dir, _ = get_contextual_dirs(profile_id)
+    db_path = os.path.join(data_dir, session_id)
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Optionally fetch setup data
+    setup_data = None
+    try:
+        import json as _json
+        with duckdb.connect(db_path, read_only=True) as con:
+            row = con.execute("SELECT value FROM metadata WHERE key = 'CarSetup'").fetchone()
+        if row:
+            setup_data = _json.loads(row[0])
+    except Exception:
+        pass
+
+    service = _get_coach_service()
+    result = service.advise_setup(
+        db_path=db_path,
+        setup_data=setup_data,
+        lap_idx=req.lap_idx,
+        data_dir=data_dir,
+        session_id=session_id,
+    )
+    if result.error:
+        raise HTTPException(status_code=500, detail=result.error)
+    return result.to_dict()
+
+
+@router.get("/ai-coach/memory")
+async def ai_coach_list_memory(
+    circuit: Optional[str] = Query(None),
+    car: Optional[str] = Query(None),
+    profile_id: Optional[str] = Query("guest"),
+):
+    from ..services.ai_coach.engineer_memory import EngineerMemory
+    data_dir, _ = get_contextual_dirs(profile_id)
+    memory = EngineerMemory(data_dir)
+    return {"observations": memory.list_all(circuit=circuit, car=car)}
+
+
+@router.delete("/ai-coach/memory/{observation_id}")
+async def ai_coach_delete_memory(
+    observation_id: int,
+    profile_id: Optional[str] = Query("guest"),
+):
+    from ..services.ai_coach.engineer_memory import EngineerMemory
+    data_dir, _ = get_contextual_dirs(profile_id)
+    memory = EngineerMemory(data_dir)
+    deleted = memory.delete(observation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Observation not found")
+    return {"ok": True}
+
+
 @router.get("/debug/env")
 async def debug_env():
-    """Diagnostic endpoint for packaged environment."""
+    """Diagnostic endpoint for packaged environment. Blocked in server mode by LocalOnlyGuard."""
+    settings = get_settings()
     return {
         "is_frozen": getattr(sys, 'frozen', False),
-        "sys_executable": sys.executable,
-        "os_getcwd": os.getcwd(),
         "APP_DATA_ROOT": APP_DATA_ROOT,
         "APP_DATA_ROOT_exists": os.path.exists(APP_DATA_ROOT),
-        "files_in_data": os.listdir(APP_DATA_ROOT) if os.path.exists(APP_DATA_ROOT) else [],
-        "env_duckdb_data_dir": os.environ.get('DUCKDB_DATA_DIR')
+        "mode": settings.APP_MODE,
     }
