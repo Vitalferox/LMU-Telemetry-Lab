@@ -283,9 +283,9 @@ def prepare_setup_analysis(
         result["tyres"] = tyre_info
 
     # Ride heights
-    if "Front Ride Height" in df.columns and "Rear Ride Height" in df.columns:
-        frh = np.array(df["Front Ride Height"])
-        rrh = np.array(df["Rear Ride Height"])
+    if "FrontRideHeight" in df.columns and "RearRideHeight" in df.columns:
+        frh = np.array(df["FrontRideHeight"])
+        rrh = np.array(df["RearRideHeight"])
         frh, rrh = frh[~np.isnan(frh)], rrh[~np.isnan(rrh)]
         if len(frh) > 0 and len(rrh) > 0:
             result["ride_heights_mm"] = {
@@ -348,7 +348,7 @@ def _tyre_summary(df) -> Optional[dict]:
         if tc.ndim == 2 and tc.shape[1] == 4:
             info["centre_avg"] = {w: round(float(np.nanmean(tc[:, i])), 1) for i, w in enumerate(wheels)}
 
-    for label, col in [("inside_avg", "TyresTempInside"), ("outside_avg", "TyresTempOutside")]:
+    for label, col in [("inside_avg", "TyresTempLeft"), ("outside_avg", "TyresTempRight")]:
         if col in df.columns:
             arr = np.array(df[col])
             if arr.ndim == 2 and arr.shape[1] == 4:
