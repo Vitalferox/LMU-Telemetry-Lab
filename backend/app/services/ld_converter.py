@@ -722,6 +722,7 @@ _EXTRA_CHANNELS = {
     "CamberDyn", "ToeDyn", "TyreLoad", "GripFract",
     "TyreLatForce", "TyreLongForce", "VertTyreDeflection", "BrakePressure",
     "TyresRubberTempInner", "TyresRubberTempOuter", "Susp Force",
+    "FrontRideHeight", "RearRideHeight",
 }
 
 
