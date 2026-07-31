@@ -6,6 +6,7 @@ block_cipher = None
 # Also include our car lookup CSV and the frontend/dist folder
 added_files = [
     ('lmu_carname_to_modelname.csv', '.'),
+    ('backend/discord_config.json', '.'),
     ('frontend/dist', 'frontend/dist')
 ]
 

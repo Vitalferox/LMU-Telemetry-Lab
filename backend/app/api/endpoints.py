@@ -14,11 +14,58 @@ from ..security import safe_session_id
 from ..config import get_settings
 import duckdb
 import numpy as np
-from ..utils.track_db import find_track_in_registry
+from ..utils.track_db import find_track_in_registry, find_layout_in_track
 
 router = APIRouter()
 
 import sys
+
+def resolve_layout_and_length(con, track_data, matched_key: str, track_layout: str, track_name: str):
+    """
+    Resolves the standardized layout key and official track length,
+    incorporating distance-based fingerprint fallback logic.
+    Returns (layout_key, official_track_length)
+    """
+    if not matched_key:
+        return track_layout, None
+        
+    layouts_dict = track_data.get("layouts", {})
+    matched_layout_key, layout_data = find_layout_in_track(track_data, track_layout, matched_key)
+    
+    layout_key = matched_layout_key if matched_layout_key else track_layout
+    official_len = None
+    if layout_data and "ref_points" in layout_data:
+        official_len = float(layout_data["ref_points"][-1]["dist"])
+        
+    # Smart Fallback: Distance-based fingerprinting
+    try:
+        max_dist_row = con.execute('SELECT MAX(value) FROM "Lap Dist"').fetchone()
+        if max_dist_row and max_dist_row[0] is not None:
+            actual_max_dist = float(max_dist_row[0])
+            if actual_max_dist > 500:
+                cur_len = official_len if official_len else actual_max_dist
+                ratio = actual_max_dist / cur_len
+                if ratio < 0.8 or ratio > 1.2 or not official_len:
+                    logger.info(f"Layout mismatch in endpoint (Ratio: {ratio:.2f}). Finding closest match for {actual_max_dist:.1f}m...")
+                    best_layout_key = layout_key
+                    best_len = official_len if official_len else actual_max_dist
+                    min_diff = abs(actual_max_dist - best_len) if official_len else float('inf')
+                    
+                    for k, v in layouts_dict.items():
+                        if "ref_points" in v:
+                            l_dist = float(v["ref_points"][-1]["dist"])
+                            diff = abs(actual_max_dist - l_dist)
+                            if diff < min_diff:
+                                min_diff = diff
+                                best_len = l_dist
+                                best_layout_key = k
+                                
+                    layout_key = best_layout_key
+                    official_len = best_len
+    except Exception as e:
+        logger.warning(f"Failed resolve_layout_and_length fingerprinting: {e}")
+        
+    return layout_key, official_len
 
 @router.get("/health")
 async def health_check():
@@ -51,6 +98,12 @@ async def get_3d_track(
             meta_dict = {k: v for k, v in meta}
             track_name = meta_dict.get('TrackName')
             track_layout = meta_dict.get('TrackLayout')
+            
+            # Standardize track layout name with smart distance fallback
+            layout_key = track_layout
+            matched_key, track_data = find_track_in_registry(track_name)
+            if matched_key:
+                layout_key, _ = resolve_layout_and_length(con, track_data, matched_key, track_layout, track_name)
             
             # 1. Resolve Times for the Selected Lap (Racing Line)
             laps_header = TelemetryService.get_laps_header(db_path)
@@ -98,7 +151,7 @@ async def get_3d_track(
                 lap_times=lap_times, 
                 base_times=base_times, 
                 track_name=track_name, 
-                track_layout=track_layout,
+                track_layout=layout_key,
                 session_id=session_id,
                 stint=stint,
                 stint_range=[stint_start, stint_end],
@@ -110,6 +163,7 @@ async def get_3d_track(
             return {
                 "baseMap": data_dict["baseMap"], "racingLine": data_dict["racingLine"],
                 "trackName": track_name, "trackLayout": track_layout,
+                "layoutKey": layout_key,
                 "fastestLap": best_lap['lap'], "selectedLapInfo": selected_lap,
                 "trackSectors": data_dict.get("trackSectors", []),
                 "center": data_dict.get("center"),
@@ -377,10 +431,10 @@ async def pick_and_upload(req: OpenPathRequest, profile_id: Optional[str] = Quer
         
         initial_dir = path if os.path.exists(path) else None
         
-        # Open the native file picker
-        file_path = filedialog.askopenfilename(
+        # Open the native file picker with multi-select support
+        file_paths = filedialog.askopenfilenames(
             initialdir=initial_dir,
-            title="Select LMU Telemetry File (.duckdb or .ld)",
+            title="Select LMU Telemetry File(s) (.duckdb or .ld)",
             filetypes=[
                 ("LMU Telemetry files", "*.duckdb *.ld"),
                 ("DuckDB files", "*.duckdb"),
@@ -388,50 +442,64 @@ async def pick_and_upload(req: OpenPathRequest, profile_id: Optional[str] = Quer
                 ("All files", "*.*"),
             ]
         )
-        
-        root.destroy() # Cleanup tkinter
-        
-        if not file_path:
-            return {"status": "cancelled"}
-            
-        filename = os.path.basename(file_path)
 
-        if filename.lower().endswith(".ld"):
-            # Convert .ld → .duckdb with canonical filename
-            from ..services.ld_converter import convert_ld_to_duckdb
-            tmp_path = os.path.join(data_dir, "_tmp_ld_convert.duckdb")
-            try:
-                info = convert_ld_to_duckdb(file_path, tmp_path)
-                duckdb_filename = _canonical_db_name(info)
-                dest_path = os.path.join(data_dir, duckdb_filename)
-                if os.path.exists(dest_path):
-                    os.remove(tmp_path)
-                else:
-                    os.rename(tmp_path, dest_path)
-                return {
-                    "status": "success",
-                    "id": duckdb_filename,
-                    "message": f"Converted and imported {filename} → {duckdb_filename}",
-                    "track": info.get("track"),
-                    "driver": info.get("driver"),
-                    "laps": info.get("laps"),
-                }
-            except Exception as conv_err:
-                logger.error(f".ld conversion failed: {conv_err}", exc_info=True)
-                if os.path.exists(tmp_path):
-                    try: os.remove(tmp_path)
-                    except: pass
-                return {"status": "error", "message": f"Conversion failed: {str(conv_err)}"}
-        else:
-            # Regular .duckdb — copy as-is
-            dest_path = os.path.join(data_dir, filename)
-            shutil.copy2(file_path, dest_path)
-            return {
-                "status": "success",
-                "id": filename,
-                "message": f"Successfully imported {filename}"
-            }
-        
+        root.destroy() # Cleanup tkinter
+
+        if not file_paths:
+            return {"status": "cancelled"}
+
+        last_filename = None
+        last_info = None
+        imported_ids = []
+        for path_item in file_paths:
+            if not path_item:
+                continue
+            filename = os.path.basename(path_item)
+
+            if filename.lower().endswith(".ld"):
+                # Convert .ld → .duckdb with canonical filename
+                from ..services.ld_converter import convert_ld_to_duckdb
+                tmp_path = os.path.join(data_dir, "_tmp_ld_convert.duckdb")
+                try:
+                    info = convert_ld_to_duckdb(path_item, tmp_path)
+                    duckdb_filename = _canonical_db_name(info)
+                    dest_path = os.path.join(data_dir, duckdb_filename)
+                    if os.path.exists(dest_path):
+                        os.remove(tmp_path)
+                    else:
+                        os.rename(tmp_path, dest_path)
+                    last_filename = duckdb_filename
+                    last_info = info
+                    imported_ids.append(duckdb_filename)
+                except Exception as conv_err:
+                    logger.error(f".ld conversion failed for {filename}: {conv_err}", exc_info=True)
+                    if os.path.exists(tmp_path):
+                        try: os.remove(tmp_path)
+                        except: pass
+                    continue
+            else:
+                # Regular .duckdb — copy as-is
+                dest_path = os.path.join(data_dir, filename)
+                shutil.copy2(path_item, dest_path)
+                last_filename = filename
+                last_info = None
+                imported_ids.append(filename)
+
+        if not last_filename:
+            return {"status": "cancelled"}
+
+        result = {
+            "status": "success",
+            "id": last_filename,
+            "ids": imported_ids,
+            "message": f"Successfully imported {len(imported_ids)} file(s)"
+        }
+        if last_info:
+            result["track"] = last_info.get("track")
+            result["driver"] = last_info.get("driver")
+            result["laps"] = last_info.get("laps")
+        return result
+
     except Exception as e:
         logger.error(f"Native file picker failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -855,21 +923,11 @@ async def list_sessions(profile_id: Optional[str] = Query("guest")):
                         session_info["trackAliases"] = track_data.get("aliases", [])
                         session_info["country"] = track_data.get("country", "")
                         
-                        # Extract official length from registry for the specific layout
-                        layouts_dict = track_data.get("layouts", {})
-                        layout_data = layouts_dict.get(track_layout)
-                        if not layout_data:
-                            for k, v in layouts_dict.items():
-                                if k.lower() in (track_layout or "").lower() or (track_layout or "").lower() in k.lower():
-                                    layout_data = v
-                                    break
-                                    
-                        if not layout_data or track_layout == track_name:
-                            layout_data = layouts_dict.get("Default")
-
-                        if layout_data and "ref_points" in layout_data:
-                            # Use the last reference point's distance as the official length
-                            official_len = layout_data["ref_points"][-1]["dist"]
+                        # Extract official length and standardize layout name with smart distance fallback
+                        layout_key, official_len = resolve_layout_and_length(con, track_data, matched_key, track_layout, track_name)
+                        if layout_key:
+                            session_info["layoutKey"] = layout_key
+                        if official_len:
                             session_info["officialTrackLength"] = official_len
                 
                 if track_layout: session_info["trackLayout"] = track_layout
@@ -1052,17 +1110,13 @@ async def export_session_setup(session_id: str, request: Request, custom_car_mod
             with duckdb.connect(db_path, read_only=True) as con:
                 meta_rows = con.execute(
                     "SELECT key, value FROM metadata WHERE key IN "
-                    "('TrackName', 'CarName', 'CarClass', 'RecordingTime')"
+                    "('TrackName', 'TrackLayout', 'CarName', 'CarClass', 'RecordingTime')"
                 ).fetchall()
             meta = {k: v for k, v in meta_rows}
 
-            raw_track = meta.get("TrackName", "Track")
-            matched_key, track_data = find_track_in_registry(raw_track)
-            if track_data and "display_name" in track_data:
-                track_name = track_data["display_name"]
-            else:
-                track_name = matched_key if matched_key else raw_track
-            track_name = track_name.replace(" ", "-")
+            import re
+            layout_name = meta.get("TrackLayout", "Layout").replace(" ", "-")
+            layout_name = re.sub(r'[\\/*?:"<>|]', '', layout_name)
 
             raw_car = meta.get("CarName", "")
             raw_class = meta.get("CarClass", "")
@@ -1074,7 +1128,7 @@ async def export_session_setup(session_id: str, request: Request, custom_car_mod
 
             recording_time = meta.get("RecordingTime", os.path.splitext(session_id)[0])
 
-            filename = f"{track_name}_{car_model}_{recording_time}_setup.svm"
+            filename = f"{layout_name}_{car_model}_{recording_time}_setup.svm"
         except Exception as name_err:
             logger.warning(f"SVM filename generation failed, falling back: {name_err}")
 
@@ -1466,17 +1520,12 @@ async def export_session_lap(session_id: str, lap_number: int, request: Request,
         with duckdb.connect(db_path, read_only=True) as con:
             meta = con.execute(
                 "SELECT key, value FROM metadata WHERE key IN "
-                "('TrackName', 'CarName', 'CarClass', 'DriverName', 'RecordingTime')"
+                "('TrackName', 'TrackLayout', 'CarName', 'CarClass', 'DriverName', 'RecordingTime')"
             ).fetchall()
             meta_dict = {k: v for k, v in meta}
-            raw_track = meta_dict.get('TrackName', 'Track')
-            # Use short name from registry if possible for cleaner filenames
-            matched_key, track_data = find_track_in_registry(raw_track)
-            if track_data and "display_name" in track_data:
-                track_name = track_data["display_name"]
-            else:
-                track_name = matched_key if matched_key else raw_track
-            track_name = track_name.replace(" ", "-")
+            import re
+            layout_name = meta_dict.get('TrackLayout', 'Layout').replace(" ", "-")
+            layout_name = re.sub(r'[\\/*?:"<>|]', '', layout_name)
             raw_car = meta_dict.get('CarName', '')
             raw_class = meta_dict.get('CarClass', '')
             driver_name = meta_dict.get('DriverName', 'Driver').replace(" ", "-")
@@ -1499,7 +1548,7 @@ async def export_session_lap(session_id: str, lap_number: int, request: Request,
             lap_time_str = f"{m}m{s:02d}s{ms:03d}"
 
         # 3. Generate Filename — use original session's RecordingTime as timestamp
-        export_filename = f"{track_name}-{car_model}-L{lap_number}-{lap_time_str}_{recording_time}.duckdb"
+        export_filename = f"{layout_name}-{car_model}-L{lap_number}-{lap_time_str}_{recording_time}.duckdb"
         
         # Ensure cache dir exists
         if not os.path.exists(cache_dir):
@@ -1667,6 +1716,170 @@ async def ai_coach_delete_memory(
         raise HTTPException(status_code=404, detail="Observation not found")
     return {"ok": True}
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Discord Telemetry Sharing
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DiscordShareRequest(BaseModel):
+    lap_number: int
+    title: str
+    content: str
+    attach_setup: bool
+    car_class: str
+    custom_car_model: Optional[str] = None
+    profile_id: Optional[str] = "guest"
+    discord_handle: Optional[str] = None
+
+@router.get("/discord/config")
+async def get_discord_config():
+    """Get public Discord configuration (configured state and invite URL)."""
+    try:
+        from ..services.discord_service import DiscordService
+        return {
+            "is_configured": DiscordService.is_configured(),
+            "invite_url": DiscordService.get_invite_url()
+        }
+    except Exception as e:
+        logger.error(f"Error in get_discord_config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/sessions/{session_id}/discord/share")
+async def discord_share_session_lap(session_id: str, request: DiscordShareRequest):
+    """Export a lap (and optional setup) and upload to Discord Forum."""
+    from ..services.discord_service import DiscordService
+    from ..services.car_lookup import get_car_info
+    import re
+    
+    if not DiscordService.is_configured():
+        raise HTTPException(status_code=400, detail="Discord Bot is not configured. Please check discord_config.json")
+        
+    data_dir, cache_dir = get_contextual_dirs(request.profile_id)
+    db_path = os.path.join(data_dir, session_id)
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail=f"Session file not found: {session_id}")
+        
+    # 1. Generate lap export (standalone sliced duckdb)
+    try:
+        with duckdb.connect(db_path, read_only=True) as con:
+            meta_rows = con.execute(
+                "SELECT key, value FROM metadata WHERE key IN "
+                "('TrackName', 'TrackLayout', 'CarName', 'CarClass', 'RecordingTime')"
+            ).fetchall()
+        meta = {k: v for k, v in meta_rows}
+        
+        track_name = meta.get("TrackName", "Track")
+        layout_name = meta.get("TrackLayout", "Layout").replace(" ", "-")
+        layout_name = re.sub(r'[\\/*?:"<>|]', '', layout_name)
+        
+        raw_car = meta.get("CarName", "")
+        raw_class = meta.get("CarClass", "")
+        
+        if request.custom_car_model:
+            friendly_car = request.custom_car_model
+        else:
+            friendly_car, _ = get_car_info(raw_car, raw_class)
+        car_model = friendly_car.replace(" ", "-")
+        
+        recording_time = meta.get("RecordingTime", os.path.splitext(session_id)[0])
+        
+        # Determine lap time string
+        lap_time_str = "unknown"
+        laps_res = TelemetryService.get_laps_header(db_path)
+        laps = laps_res.get("laps", [])
+        target_lap = next((l for l in laps if l.get("lap") == request.lap_number), None)
+        if target_lap:
+            t = target_lap["duration"]
+            m = int(t // 60)
+            s = int(t % 60)
+            ms = int((t * 1000) % 1000)
+            lap_time_str = f"{m}m{s:02d}s{ms:03d}"
+            
+        # Sliced lap filename
+        export_filename = f"{layout_name}-{car_model}-L{request.lap_number}-{lap_time_str}_{recording_time}.duckdb"
+        
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir, exist_ok=True)
+            
+        export_path = os.path.join(cache_dir, export_filename)
+        TelemetryService.export_lap(db_path, request.lap_number, export_path)
+        
+        if not os.path.exists(export_path):
+            raise HTTPException(status_code=500, detail="Failed to slice lap telemetry file")
+            
+        # Overwrite metadata in exported DuckDB if custom_car_model is supplied
+        if request.custom_car_model:
+            try:
+                with duckdb.connect(export_path, read_only=False) as con_export:
+                    con_export.execute("UPDATE metadata SET value = ? WHERE key = 'CarName'", (request.custom_car_model,))
+            except Exception as update_err:
+                logger.warning(f"Failed to update metadata CarName in sliced export DB for Discord: {update_err}")
+
+        file_paths = [export_path]
+        
+        # 2. Generate Setup file (.svm) if requested
+        setup_path = None
+        if request.attach_setup:
+            try:
+                svm_content = generate_svm_from_duckdb(db_path)
+                setup_filename = f"{layout_name}_{car_model}_{recording_time}_setup.svm"
+                setup_path = os.path.join(cache_dir, setup_filename)
+                with open(setup_path, "w", encoding="utf-8") as f_setup:
+                    f_setup.write(svm_content)
+                file_paths.append(setup_path)
+            except Exception as setup_err:
+                logger.error(f"Setup generation failed for Discord share: {setup_err}")
+
+        # 3. Share to Discord (Match tag name by track name)
+        track_tag_name = track_name if track_name else ""
+        
+        # Validate Discord membership (Scheme B)
+        if not request.discord_handle:
+            raise HTTPException(status_code=400, detail="Discord username is required for server membership verification.")
+            
+        member_data = DiscordService.search_guild_member(request.discord_handle)
+        if not member_data:
+            raise HTTPException(
+                status_code=400, 
+                detail="You are not a member of our Discord server yet! Please join our server to share telemetry."
+            )
+            
+        user_id = member_data.get("user_id")
+        driver_mention = f"<@{user_id}>"
+        
+        header_block = (
+            f"### Telemetry Shared by {driver_mention}\n\n"
+            f"* **Track:** {track_name} ({layout_name})\n"
+            f"* **Car:** {friendly_car}\n"
+            f"* **Lap Time:** {lap_time_str}\n\n"
+            f"---\n\n"
+        )
+        full_content = header_block + request.content
+        
+        result = DiscordService.share_to_forum(
+            car_class=request.car_class,
+            title=request.title,
+            content=full_content,
+            track_tag_name=track_tag_name,
+            file_paths=file_paths
+        )
+        
+        # 4. Cleanup temp files
+        for fp in file_paths:
+            try:
+                if os.path.exists(fp):
+                    os.remove(fp)
+            except Exception as cleanup_err:
+                logger.warning(f"Failed to clean up temp file {fp}: {cleanup_err}")
+                
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=result.get("error"))
+            
+        return result
+        
+    except Exception as e:
+        logger.error(f"Discord sharing failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/debug/env")
 async def debug_env():

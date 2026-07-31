@@ -36,6 +36,90 @@ export const findMappedCarModel = (rawName: string | undefined, mappings: Record
     return matchedKey ? mappings[matchedKey] : undefined;
 };
 
+export const getPlaybackTimeRange = (state: any) => {
+    const { selectedSegIdx, selectedSectorIdx, miniSectorState, telemetryData, laps, selectedLapIdx } = state;
+    
+    // Original Segment Logic
+    if (selectedSegIdx !== null && miniSectorState?.currentLapMiniSectorTimes && telemetryData && selectedLapIdx !== null) {
+        const curTimes = miniSectorState.currentLapMiniSectorTimes;
+        const segTime = curTimes[selectedSegIdx];
+        if (!segTime) return null;
+
+        const timeChan = telemetryData['Time'];
+        const lapChan = telemetryData['Lap'];
+        const currentLap = laps.find((l: any) => l.lap === selectedLapIdx);
+        if (!timeChan || !currentLap || !lapChan) return null;
+
+        let curLineS = -1;
+        for (let i = 0; i < lapChan.length; i++) {
+            if (lapChan[i] === selectedLapIdx) {
+                curLineS = i;
+                break;
+            }
+        }
+        if (curLineS === -1) return null;
+
+        const absStart = timeChan[segTime.startIdx];
+        const absEnd = timeChan[segTime.endIdx];
+        
+        if (absStart === undefined || absEnd === undefined) return null;
+
+        const startElapsed = Math.max(0, absStart - timeChan[curLineS]);
+        const endElapsed = Math.max(0, absEnd - timeChan[curLineS]);
+
+        return { min: startElapsed, max: endElapsed };
+    }
+
+    // New Sector Logic
+    if (selectedSectorIdx !== null && telemetryData && selectedLapIdx !== null) {
+        const timeChan = telemetryData['Time'] || telemetryData['GPS Time'];
+        const lapChan = telemetryData['Lap'] || telemetryData['lap'];
+        const currentLap = laps.find((l: any) => l.lap === selectedLapIdx);
+        if (!timeChan || !currentLap) return null;
+
+        let curLineS = -1;
+        if (lapChan) {
+            for (let i = 0; i < lapChan.length; i++) {
+                if (lapChan[i] === selectedLapIdx) {
+                    curLineS = i;
+                    break;
+                }
+            }
+        }
+
+        const zoomRange = state.zoomRange;
+        if (zoomRange && timeChan && curLineS !== -1) {
+            const absStart = timeChan[zoomRange[0]];
+            const absEnd = timeChan[zoomRange[1]];
+            if (absStart !== undefined && absEnd !== undefined) {
+                const startElapsed = Math.max(0, absStart - timeChan[curLineS]);
+                const endElapsed = Math.max(0, absEnd - timeChan[curLineS]);
+                return { min: startElapsed, max: endElapsed };
+            }
+        }
+
+        if (currentLap.s1 === undefined || currentLap.s2 === undefined || currentLap.s3 === undefined) return null;
+
+        let sectorStartElapsed = 0;
+        let sectorEndElapsed = 0;
+
+        if (selectedSectorIdx === 0) { // S1
+            sectorStartElapsed = 0;
+            sectorEndElapsed = currentLap.s1;
+        } else if (selectedSectorIdx === 1) { // S2
+            sectorStartElapsed = currentLap.s1;
+            sectorEndElapsed = currentLap.s1 + currentLap.s2;
+        } else if (selectedSectorIdx === 2) { // S3
+            sectorStartElapsed = currentLap.s1 + currentLap.s2;
+            sectorEndElapsed = currentLap.duration;
+        }
+
+        return { min: sectorStartElapsed, max: sectorEndElapsed };
+    }
+
+    return null;
+};
+
 export interface TelemetryState {
     sessions: Session[];
     currentSessionId: string | null;
@@ -174,6 +258,26 @@ export interface TelemetryState {
     isGlobalTransitioning: boolean; // NEW: Full-screen transition for major events
     singleLapXAxisMode: 'distance' | 'time'; // NEW: Independent X-axis mode for single lap
     mapMarkerType: 'arrow' | 'dot'; // NEW: Phase 2 marker selection
+    showMiniSectors: boolean; // NEW: Mini sector view mode
+    showLeftHUDs: boolean; // NEW: Toggle left HUD panels visibility
+    setShowMiniSectors: (show: boolean) => void; // NEW
+    defaultShowMiniSectors: boolean; // NEW: Default mini sector view preference
+    setDefaultShowMiniSectors: (show: boolean) => void; // NEW
+    miniSectorState: {
+        miniSectors: any[];
+        currentLapMiniSectorTimes: any[] | null;
+        refLapMiniSectorTimes: any[] | null;
+        allLapsMiniSectorTimes: Record<number, any[]>;
+        sessionMiniSectorBests: {
+            bests: Array<{ label: string; val: number; lap: number }>;
+            theoreticalBest: number;
+        } | null;
+    } | null;
+    selectedSegIdx: number | null; // NEW: Currently selected mini-sector index for clipping & focus
+    selectedSectorIdx: number | null; // NEW: Currently selected sector index (0=S1, 1=S2, 2=S3)
+    setMiniSectorState: (state: any) => void;
+    setSelectedSegIdx: (idx: number | null) => void;
+    setSelectedSectorIdx: (idx: number | null) => void;
 
     // AI Coach / Race Engineer
     raceEngineerResult: import('../types').AnalysisResult | null;
@@ -235,6 +339,7 @@ export interface TelemetryState {
     setMaximizedSidebarMode: (mode: 'hud' | 'data_sources') => void; // NEW
     setShowMiniMap: (show: boolean) => void; // NEW
     setTrackMapPoppedOut: (is: boolean) => void;
+    setShowLeftHUDs: (show: boolean) => void; // NEW
     setActiveChartCategory: (category: ChartCategory) => void;
     setIsMapTransitioning: (is: boolean) => void;
     setIsGlobalTransitioning: (is: boolean) => void;
@@ -280,6 +385,14 @@ export interface TelemetryState {
     setDashboardSyncMode: (mode: 'distance' | 'time') => void;
     exportLap: (lapNumber: number) => Promise<void>;
     exportLapWithSetup: (lapNumber: number) => Promise<void>;
+    shareToDiscord: (
+        lapNumber: number,
+        title: string,
+        content: string,
+        attachSetup: boolean,
+        carClass: string,
+        discordHandle?: string
+    ) => Promise<{ success: boolean; thread_id?: string }>;
 }
 
 const DEFAULT_CHARTS: ChartConfig[] = [
@@ -653,12 +766,32 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     maximizedSidebarMode: 'hud',
     showMiniMap: localStorage.getItem('show_minimap') !== 'false',
     isTrackMapPoppedOut: false,
+    showLeftHUDs: true,
     isUserInteractingWithCharts: false,
     isHudAnimating: false,
     isMapTransitioning: false,
     isGlobalTransitioning: false,
     singleLapXAxisMode: (localStorage.getItem('singleLapXAxisMode') as 'distance' | 'time') || 'distance',
     mapMarkerType: (localStorage.getItem('map_marker_type') as 'arrow' | 'dot') || 'arrow',
+    showMiniSectors: localStorage.getItem('defaultShowMiniSectors') === 'true',
+    setShowMiniSectors: (show) => set({
+        showMiniSectors: show,
+        selectedSegIdx: null,
+        selectedSectorIdx: null,
+        zoomRange: null,
+        playbackElapsed: 0
+    }),
+    defaultShowMiniSectors: localStorage.getItem('defaultShowMiniSectors') === 'true',
+    setDefaultShowMiniSectors: (show) => {
+        localStorage.setItem('defaultShowMiniSectors', String(show));
+        set({ defaultShowMiniSectors: show });
+    },
+    miniSectorState: null,
+    selectedSegIdx: null,
+    selectedSectorIdx: null,
+    setMiniSectorState: (state) => set({ miniSectorState: state }),
+    setSelectedSegIdx: (idx) => set({ selectedSegIdx: idx }),
+    setSelectedSectorIdx: (idx) => set({ selectedSectorIdx: idx }),
     suspensionViewMode: (localStorage.getItem('suspension_view_mode') as 'split' | 'merged') || 'split',
     thirdDeflectionViewMode: (localStorage.getItem('third_deflection_view_mode') as 'split' | 'merged') || 'split',
     handlingViewMode: (localStorage.getItem('handling_view_mode') as 'split' | 'merged') || 'split',
@@ -830,6 +963,37 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             set({ isListLoading: false });
         }
     },
+    shareToDiscord: async (lapNumber, title, content, attachSetup, carClass, discordHandle) => {
+        const sessionId = get().currentSessionId;
+        if (!sessionId) throw new Error('No active session selected');
+        set({ isListLoading: true });
+        try {
+            const profileId = get().activeProfileId || 'guest';
+            const rawCarName = get().sessionMetadata?.rawCarName;
+            const customCarMappings = get().customCarMappings;
+            const mappedCarModel = findMappedCarModel(rawCarName, customCarMappings);
+            const customCarModel = mappedCarModel || get().sessionMetadata?.modelName;
+            
+            const result = await apiClient.shareToDiscord(
+                sessionId,
+                lapNumber,
+                title,
+                content,
+                attachSetup,
+                carClass,
+                customCarModel || undefined,
+                profileId,
+                discordHandle
+            );
+            return result;
+        } catch (e: any) {
+            console.error('Failed to share to Discord:', e);
+            set({ error: e.message || 'Failed to share to Discord' });
+            throw e;
+        } finally {
+            set({ isListLoading: false });
+        }
+    },
     setShowTelemetryOverlay: (show) => set({ showTelemetryOverlay: show }),
     setSelectedWheel: (wheel) => {
         if (wheel) localStorage.setItem('selected_steering_wheel', wheel);
@@ -994,7 +1158,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         get().validateHudLayout();
     },
     setIsMapMaximized: (is) => {
-        const updates: any = { isMapMaximized: is, isHudAnimating: true, isMapTransitioning: true };
+        const updates: any = { isMapMaximized: is, isHudAnimating: true, isMapTransitioning: true, showLeftHUDs: true };
 
         // When entering maximized mode, default all HUDs to open
         if (is) {
@@ -1035,6 +1199,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             hudVisibility: { ...state.hudVisibility, dataCharts: true, analysisLaps: true },
         } : {}),
     })),
+    setShowLeftHUDs: (show) => set({ showLeftHUDs: show }),
     setIsMapTransitioning: (is) => set({ isMapTransitioning: is }),
     setIsGlobalTransitioning: (is) => set({ isGlobalTransitioning: is }),
     setActiveChartCategory: (category) => {
@@ -1132,6 +1297,10 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             isPlaying: false,
             cursorIndex: startIdx !== null ? startIdx : get().cursorIndex,
             smoothCursorIndex: startIdx !== null ? startIdx : get().cursorIndex,
+            selectedSegIdx: null,
+            selectedSectorIdx: null,
+            zoomRange: null,
+            playbackElapsed: 0,
             isHudAnimating: true // Trigger animation lock
         });
 
@@ -1226,8 +1395,15 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
 
     syncFromElapsed: (elapsed: number) => {
         const { telemetryData, referenceTelemetryData, laps, selectedLapIdx, referenceLap, referenceLapIdx } = get();
+        
+        const timeRange = getPlaybackTimeRange(get());
+        let effectiveElapsed = elapsed;
+        if (timeRange) {
+            effectiveElapsed = Math.max(timeRange.min, Math.min(timeRange.max, elapsed));
+        }
+
         if (!telemetryData) {
-            set({ referenceCursorIndex: null, referenceDeltaIndex: null, liveDelta: null, playbackElapsed: elapsed });
+            set({ referenceCursorIndex: null, referenceDeltaIndex: null, liveDelta: null, playbackElapsed: effectiveElapsed });
             return;
         }
 
@@ -1237,7 +1413,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         const currentLap = laps.find(l => l.lap === selectedLapIdx);
 
         if (!mainTime || !currentLap || !mainLapChan) {
-            set({ referenceCursorIndex: null, referenceDeltaIndex: null, liveDelta: null, playbackElapsed: elapsed });
+            set({ referenceCursorIndex: null, referenceDeltaIndex: null, liveDelta: null, playbackElapsed: effectiveElapsed });
             return;
         }
 
@@ -1255,7 +1431,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             else if (curLineS !== -1 && mainLapChan[i] > selectedLapIdx) break;
         }
         if (curLineS === -1) {
-            set({ referenceCursorIndex: null, referenceDeltaIndex: null, liveDelta: null, playbackElapsed: elapsed });
+            set({ referenceCursorIndex: null, referenceDeltaIndex: null, liveDelta: null, playbackElapsed: effectiveElapsed });
             return;
         }
         let refLineS = -1, refLineE = -1;
@@ -1266,9 +1442,18 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             }
         }
 
-        const targetMainTime = mainTime[curLineS] + elapsed;
+        const selectedSegIdx = get().selectedSegIdx;
+        const miniSectorState = get().miniSectorState;
+        const curTimes = miniSectorState?.currentLapMiniSectorTimes;
+        const refTimes = miniSectorState?.refLapMiniSectorTimes;
+        const curSeg = (selectedSegIdx !== null && curTimes) ? curTimes[selectedSegIdx] : null;
+        const refSeg = (selectedSegIdx !== null && refTimes) ? refTimes[selectedSegIdx] : null;
+
+        const targetMainTime = mainTime[curLineS] + effectiveElapsed;
         const clampedMainTime = Math.min(targetMainTime, mainTime[curLineE]);
-        const mainIdx = findIndexInChannelRange(mainTime, clampedMainTime, curLineS, curLineE);
+        const searchMainS = curSeg ? curSeg.startIdx : curLineS;
+        const searchMainE = curSeg ? curSeg.endIdx : curLineE;
+        const mainIdx = findIndexInChannelRange(mainTime, clampedMainTime, searchMainS, searchMainE);
 
         // Delta variables
         let refIdx = null;
@@ -1276,32 +1461,59 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         let delta = null;
 
         if (refLineS !== -1 && refTime && refDist) {
-            const targetRefTime = refTime[refLineS] + elapsed;
-            const clampedRefTime = Math.min(targetRefTime, refTime[refLineE]);
-            refIdx = findIndexInChannelRange(refTime, clampedRefTime, refLineS, refLineE);
+            // TIME SYNC - WITH SECTOR OFFSET ALIGNMENT IF SELECTED
+            let targetRefTimeElapsed = effectiveElapsed;
+            if (curSeg && refSeg && refMeta) {
+                const currentStartElapsed = Math.max(0, mainTime[curSeg.startIdx] - mainTime[curLineS]);
+                const refStartElapsed = Math.max(0, refTime[refSeg.startIdx] - refTime[refLineS]);
+                targetRefTimeElapsed = refStartElapsed + (effectiveElapsed - currentStartElapsed);
+            }
 
-            // DISTANCE SYNC (For Delta Calculation) - WITH NORMALIZATION
-            // We use Progress Percentage to align laps of different lengths
+            const targetRefTime = refTime[refLineS] + targetRefTimeElapsed;
+            const clampedRefTime = Math.min(targetRefTime, refTime[refLineE]);
+            // If focused on a mini-sector, constrain search range to the sector boundaries
+            const searchRefS = (curSeg && refSeg) ? refSeg.startIdx : refLineS;
+            const searchRefE = (curSeg && refSeg) ? refSeg.endIdx : refLineE;
+            refIdx = findIndexInChannelRange(refTime, clampedRefTime, searchRefS, searchRefE);
+
+            // DISTANCE SYNC (For Delta Calculation) - WITH SECTOR OFFSET ALIGNMENT IF SELECTED
             const baseM = Math.floor(mainIdx);
             const nextM = Math.min(curLineE, baseM + 1);
             const fracM = mainIdx - baseM;
             const d1 = mainDist[baseM] ?? 0;
             const d2 = mainDist[nextM] ?? d1;
             const currentTotalDist = d1 + (d2 - d1) * fracM;
-            const mainLapStartDist = mainDist[curLineS] ?? 0;
-            const mainLapEndDist = mainDist[curLineE] ?? mainLapStartDist;
-            const mainLapActualLen = mainLapEndDist - mainLapStartDist;
 
-            const relDist = currentTotalDist - mainLapStartDist;
-            const progress = mainLapActualLen > 0 ? relDist / mainLapActualLen : 0;
+            let progress = 0;
+            let targetRefDist = 0;
 
-            const refLapStartDist = refDist[refLineS] ?? 0;
-            const refLapEndDist = refDist[refLineE] ?? refLapStartDist;
-            const refLapActualLen = refLapEndDist - refLapStartDist;
+            if (curSeg && refSeg) {
+                const currentStartDist = mainDist[curSeg.startIdx] ?? 0;
+                const currentEndDist = mainDist[curSeg.endIdx] ?? currentStartDist;
+                const currentSegLen = currentEndDist - currentStartDist;
+                progress = currentSegLen > 0 ? (currentTotalDist - currentStartDist) / currentSegLen : 0;
 
-            // Map progress to reference lap distance
-            const targetRefDist = refLapStartDist + (progress * refLapActualLen);
-            deltaIdx = findIndexInChannelRange(refDist, targetRefDist, refLineS, refLineE);
+                const refStartDist = refDist[refSeg.startIdx] ?? 0;
+                const refEndDist = refDist[refSeg.endIdx] ?? refStartDist;
+                const refSegLen = refEndDist - refStartDist;
+                targetRefDist = refStartDist + progress * refSegLen;
+            } else {
+                const mainLapStartDist = mainDist[curLineS] ?? 0;
+                const mainLapEndDist = mainDist[curLineE] ?? mainLapStartDist;
+                const mainLapActualLen = mainLapEndDist - mainLapStartDist;
+
+                const relDist = currentTotalDist - mainLapStartDist;
+                progress = mainLapActualLen > 0 ? relDist / mainLapActualLen : 0;
+
+                const refLapStartDist = refDist[refLineS] ?? 0;
+                const refLapEndDist = refDist[refLineE] ?? refLapStartDist;
+                const refLapActualLen = refLapEndDist - refLapStartDist;
+                targetRefDist = refLapStartDist + (progress * refLapActualLen);
+            }
+
+            const searchDistS = (curSeg && refSeg) ? refSeg.startIdx : refLineS;
+            const searchDistE = (curSeg && refSeg) ? refSeg.endIdx : refLineE;
+            deltaIdx = findIndexInChannelRange(refDist, targetRefDist, searchDistS, searchDistE);
 
             const baseD = Math.floor(deltaIdx);
             const nextD = Math.min(refLineE, baseD + 1);
@@ -1310,8 +1522,16 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             const rt1 = refTime[baseD], rt2 = refTime[nextD];
             if (rt1 !== undefined && rt2 !== undefined) {
                 const refAbsTimeAtSameDist = rt1 + fracD * (rt2 - rt1);
-                const refElapsedD = refAbsTimeAtSameDist - refTime[refLineS];
-                const mainElapsedAtD = clampedMainTime - mainTime[curLineS];
+                
+                let refElapsedD = 0;
+                let mainElapsedAtD = 0;
+                if (curSeg && refSeg) {
+                    refElapsedD = refAbsTimeAtSameDist - refTime[refSeg.startIdx];
+                    mainElapsedAtD = clampedMainTime - mainTime[curSeg.startIdx];
+                } else {
+                    refElapsedD = refAbsTimeAtSameDist - refTime[refLineS];
+                    mainElapsedAtD = clampedMainTime - mainTime[curLineS];
+                }
                 delta = mainElapsedAtD - refElapsedD;
             }
         }
@@ -1322,7 +1542,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             referenceCursorIndex: refIdx,
             referenceDeltaIndex: deltaIdx,
             liveDelta: delta,
-            playbackElapsed: elapsed
+            playbackElapsed: effectiveElapsed
         });
     },
 
@@ -1664,6 +1884,8 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             isPlaying: false,
             selectedLapIdx: lapIdx,
             zoomRange: null,
+            selectedSegIdx: null, // Reset mini sector focus
+            selectedSectorIdx: null, // Reset sector focus
             cursorIndex: startIdx,
             smoothCursorIndex: startIdx,
             playbackElapsed: 0
@@ -1697,6 +1919,8 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             referenceLap: null,
             referenceSessionMetadata: null,
             isPlaying: false,
+            selectedSegIdx: null, // Reset mini sector focus
+            selectedSectorIdx: null, // Reset sector focus
             cursorIndex: startIdx !== null ? startIdx : get().cursorIndex,
             smoothCursorIndex: startIdx !== null ? startIdx : get().cursorIndex,
             playbackElapsed: 0
@@ -1807,7 +2031,12 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         get().syncReferenceIndex();
     },
     setZoomRange: (range: [number, number] | null) => {
-        set({ zoomRange: range });
+        const updates: any = { zoomRange: range };
+        if (range === null) {
+            updates.selectedSegIdx = null;
+            updates.selectedSectorIdx = null;
+        }
+        set(updates);
     },
 
     fetch3DTrack: async (lapIdx: number, stintId?: number | null) => {
@@ -2058,12 +2287,21 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             const refDur = hasRefData && refMeta ? (refMeta.duration || 0) : 0;
             const maxDur = Math.max(curDur, refDur);
 
-            if (get().playbackElapsed >= maxDur - 0.1) {
-                set({ playbackElapsed: 0 });
-                get().syncFromElapsed(0);
-                // Slight delay to ensure state propagates before playing
-                setTimeout(() => set({ isPlaying: true }), 10);
-                return;
+            const timeRange = getPlaybackTimeRange(get());
+            if (timeRange) {
+                if (get().playbackElapsed >= timeRange.max - 0.1 || get().playbackElapsed < timeRange.min) {
+                    set({ playbackElapsed: timeRange.min });
+                    get().syncFromElapsed(timeRange.min);
+                    setTimeout(() => set({ isPlaying: true }), 10);
+                    return;
+                }
+            } else {
+                if (get().playbackElapsed >= maxDur - 0.1) {
+                    set({ playbackElapsed: 0 });
+                    get().syncFromElapsed(0);
+                    setTimeout(() => set({ isPlaying: true }), 10);
+                    return;
+                }
             }
         }
         set(state => ({ isPlaying: !state.isPlaying }));
@@ -2075,22 +2313,34 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         const { playbackElapsed, playbackSpeed, isPlaying, laps, selectedLapIdx, referenceLap, referenceLapIdx, telemetryData, referenceTelemetryData } = get();
         if (!isPlaying || !telemetryData || selectedLapIdx === null) return;
 
-        const currentLap = laps.find(l => l.lap === selectedLapIdx);
-        const refMeta = referenceLap || (referenceLapIdx !== null ? laps.find(l => l.lap === referenceLapIdx) : null);
-
-        const curDur = currentLap?.duration || 0;
-        const hasRefData = referenceTelemetryData || (telemetryData && referenceLapIdx !== null);
-        const refDur = hasRefData && refMeta ? (refMeta.duration || 0) : 0;
-
-        const maxDur = Math.max(curDur, refDur);
-
+        const timeRange = getPlaybackTimeRange(get());
         let newElapsed = playbackElapsed + (deltaTimeMs / 1000 * playbackSpeed);
 
-        if (newElapsed >= maxDur) {
-            newElapsed = maxDur;
-            set({ isPlaying: false, playbackElapsed: newElapsed });
+        if (timeRange) {
+            if (newElapsed < timeRange.min) {
+                newElapsed = timeRange.min;
+            }
+            if (newElapsed >= timeRange.max) {
+                newElapsed = timeRange.max;
+                set({ isPlaying: false, playbackElapsed: newElapsed });
+            } else {
+                set({ playbackElapsed: newElapsed });
+            }
         } else {
-            set({ playbackElapsed: newElapsed });
+            const currentLap = laps.find(l => l.lap === selectedLapIdx);
+            const refMeta = referenceLap || (referenceLapIdx !== null ? laps.find(l => l.lap === referenceLapIdx) : null);
+
+            const curDur = currentLap?.duration || 0;
+            const hasRefData = referenceTelemetryData || (telemetryData && referenceLapIdx !== null);
+            const refDur = hasRefData && refMeta ? (refMeta.duration || 0) : 0;
+            const maxDur = Math.max(curDur, refDur);
+
+            if (newElapsed >= maxDur) {
+                newElapsed = maxDur;
+                set({ isPlaying: false, playbackElapsed: newElapsed });
+            } else {
+                set({ playbackElapsed: newElapsed });
+            }
         }
 
         get().syncFromElapsed(newElapsed);
@@ -2106,9 +2356,15 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         const curDur = currentLap?.duration || 0;
         const hasRefData = referenceTelemetryData || (telemetryData && referenceLapIdx !== null);
         const refDur = hasRefData && refMeta ? (refMeta.duration || 0) : 0;
-
         const maxDur = Math.max(curDur, refDur);
-        const targetElapsed = progress * maxDur;
+
+        const timeRange = getPlaybackTimeRange(get());
+        let targetElapsed = 0;
+        if (timeRange) {
+            targetElapsed = timeRange.min + progress * (timeRange.max - timeRange.min);
+        } else {
+            targetElapsed = progress * maxDur;
+        }
 
         set({ playbackElapsed: targetElapsed });
         get().syncFromElapsed(targetElapsed);

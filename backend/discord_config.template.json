@@ -1,0 +1,12 @@
+{
+  "bot_token": "YOUR_DISCORD_BOT_TOKEN_HERE",
+  "guild_id": "1496410659557081098",
+  "invite_url": "https://discord.gg/zNPehXA3jK",
+  "channels": {
+    "lmgt3-telemetry-sharing": "1505950451114311730",
+    "hypercar-telemetry-sharing": "1508834645050134691",
+    "lmp3-telemetry-sharing": "1508840358144901214",
+    "lmp2-telemetry-sharing": "1508840307318587413",
+    "gte-telemetry-sharing": "1508840424951910571"
+  }
+}

@@ -883,6 +883,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
     const setMaximizedSidebarMode = useTelemetryStore(state => state.setMaximizedSidebarMode);
     const singleLapXAxisMode = useTelemetryStore(state => state.singleLapXAxisMode);
     const setSingleLapXAxisMode = useTelemetryStore(state => state.setSingleLapXAxisMode);
+    const showLeftHUDs = useTelemetryStore(state => state.showLeftHUDs);
 
     const [isSpeedOpen, setIsSpeedOpen] = useState(false);
     const [showHudMenu, setShowHudMenu] = useState(false);
@@ -1175,7 +1176,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
     }, [track3DData, staticTrackBaseData, trackCenterOffset]);
 
     const carStats = useMemo(() => {
-        if (!telemetryData || cursorIndex === null) return { alt: null, dist: null };
+        if (!telemetryData || cursorIndex === null || !laps.length) return { alt: null, dist: null };
         const idx = Math.floor(isPlaying ? (smoothCursorIndex ?? cursorIndex) : cursorIndex);
 
         let alt = null;
@@ -1184,14 +1185,44 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
         }
 
         let dist = null;
-        if (telemetryData['Lap Dist'] && telemetryData['Lap Dist'][idx] !== undefined) {
-            dist = telemetryData['Lap Dist'][idx];
-        } else if (telemetryData['Distance'] && telemetryData['Distance'][idx] !== undefined) {
-            dist = telemetryData['Distance'][idx];
+        const dists = telemetryData['Lap Dist'] || telemetryData['Distance'];
+        if (dists && dists[idx] !== undefined) {
+            dist = dists[idx];
+            
+            // Normalize and stretch distance to align with official track length
+            const lapsChan = telemetryData['Lap'] || telemetryData['lap'];
+            const currentLapIdx = (lapsChan && lapsChan[idx] !== undefined)
+                ? lapsChan[idx]
+                : (selectedLapIdx !== null ? selectedLapIdx : (laps.find(l => l.isValid)?.lap ?? laps[0].lap));
+            if (currentLapIdx !== undefined && lapsChan) {
+                let sIdx = -1;
+                let eIdx = -1;
+                for (let i = 0; i < lapsChan.length; i++) {
+                    if (lapsChan[i] == currentLapIdx) {
+                        if (sIdx === -1) sIdx = i;
+                        eIdx = i;
+                    }
+                }
+                if (sIdx !== -1 && eIdx !== -1 && dists[sIdx] !== undefined && dists[eIdx] !== undefined) {
+                    const actualLen = dists[eIdx] - dists[sIdx];
+                    const refLen = sessionMetadata?.officialTrackLength || actualLen;
+                    const stretchRatio = actualLen > 0 ? refLen / actualLen : 1;
+                    
+                    if (idx === eIdx) {
+                        dist = refLen;
+                    } else {
+                        const relDist = dist - dists[sIdx];
+                        dist = Math.max(0, relDist * stretchRatio);
+                    }
+                }
+            }
+        }
+        if (dist !== null && dist < 8) {
+            dist = 0;
         }
 
         return { alt, dist };
-    }, [telemetryData, cursorIndex, smoothCursorIndex, isPlaying]);
+    }, [telemetryData, cursorIndex, smoothCursorIndex, isPlaying, laps, selectedLapIdx, sessionMetadata?.officialTrackLength]);
 
     if (!staticTrackBaseData && !track3DData) return null; // Let global loader handle this via store.isLoading
 
@@ -1251,9 +1282,9 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                                 <div className="flex items-baseline gap-2">
                                     <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">Dist</span>
                                     <span className="text-[18px] font-black text-blue-400 tabular-nums tracking-tighter leading-none">
-                                        {carStats.dist !== null ? (carStats.dist / 1000).toFixed(2) : "--.--"}
+                                        {carStats.dist !== null ? Math.round(carStats.dist) : "---"}
                                     </span>
-                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">km</span>
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">m</span>
                                 </div>
                             </div>
                         </div>
@@ -1268,7 +1299,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                 {/* HUD: Minimap (Top Right) - Fixed 5:3 Smaller */}
                 {!isAnimating && (
                     <div className={`absolute ${isMapMaximized ? 'top-6 right-8' : 'top-4 right-4'} z-[100] w-[14rem] aspect-[5/3] transition-all duration-500 transform ${showMiniMap ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 -translate-y-4 scale-95 pointer-events-none'}`}>
-                        <div className="w-full h-full glass-container rounded-xl overflow-hidden relative transition-all duration-300 pointer-events-auto"
+                        <div className={`w-full h-full glass-container rounded-xl overflow-hidden relative transition-all duration-300 ${showMiniMap ? 'pointer-events-auto' : 'pointer-events-none'}`}
                             onMouseMove={handleGlassMouseMove}
                             style={{ '--glass-hover-scale': '1', '--glass-content-scale': '1' } as any}>
                             <div className="glass-content w-full h-full">
@@ -1530,7 +1561,15 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                     </div>
                 )}
 
-                <Canvas camera={{ position: [0, -4000, 2500], up: [0, 0, 1], fov: 40, near: 1, far: 200000 }}>
+                <div
+                    className="flex-1 relative w-full h-full"
+                    onDoubleClick={() => {
+                        if (isMapMaximized) {
+                            useTelemetryStore.getState().setShowLeftHUDs(!showLeftHUDs);
+                        }
+                    }}
+                >
+                    <Canvas camera={{ position: [0, -4000, 2500], up: [0, 0, 1], fov: 40, near: 1, far: 200000 }}>
                     <color attach="background" args={['#181a1d']} />
                     <ambientLight intensity={1.2} />
                     <pointLight position={[0, 0, 10000]} intensity={0.5} />
@@ -1625,6 +1664,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                         enableRotate={true}
                     />
                 </Canvas>
+                </div>
 
                 {/* 1. Telemetry Overlap HUD */}
                 {!isAnimating && (
@@ -1636,7 +1676,6 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                     >
                         <CompactTelemetryOverlay
                             data={telemetryData}
-                            cursorIndex={smoothCursorIndex}
                             theme="current"
                             carModel={sessionMetadata?.modelName}
                             isMiniMap={false}
@@ -1645,7 +1684,6 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                         {(referenceTelemetryData || referenceLapIdx !== null) && (
                             <CompactTelemetryOverlay
                                 data={referenceTelemetryData || telemetryData}
-                                cursorIndex={dashboardSyncMode === 'distance' ? referenceDeltaIndex : referenceCursorIndex}
                                 theme="reference"
                                 carModel={referenceSessionMetadata?.modelName || sessionMetadata?.modelName}
                                 isMiniMap={false}
@@ -1657,7 +1695,11 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                 {/* 2. Smart Sidebar */}
                 {hudMaximized && !isAnimating && (
                     <div 
-                        className={`absolute top-12 left-4 z-[200] w-[320px] flex flex-col gap-0 isolate ${maximizedSidebarMode === 'data_sources' ? 'bottom-4' : 'pointer-events-none'}`}
+                        className={`absolute top-12 left-4 z-[200] w-[320px] flex flex-col gap-0 isolate transition-all duration-300 ${
+                            showLeftHUDs 
+                                ? `opacity-100 translate-x-0 ${maximizedSidebarMode === 'data_sources' ? 'bottom-4' : 'pointer-events-none'}` 
+                                : 'opacity-0 -translate-x-4 pointer-events-none'
+                        }`}
                         onMouseMove={(e) => e.stopPropagation()}
                         onMouseEnter={(e) => e.stopPropagation()}
                     >
@@ -1812,7 +1854,7 @@ export const TrackMap3D = ({ onToggleExpand, isAnimating = false, isPopout = fal
                             }}
                             exit={{ opacity: 0, x: 40 }}
                             transition={{ type: 'spring', stiffness: 120, damping: 20 }}
-                            className="absolute bottom-4 right-[-12px] z-[2000] pointer-events-none flex flex-col justify-end"
+                            className="absolute bottom-4 right-[-12px] z-[2000] pointer-events-auto flex flex-col justify-end"
                         >
                             <DataChartsOverlay />
                         </motion.div>

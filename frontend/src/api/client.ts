@@ -182,7 +182,7 @@ export const apiClient = {
     },
 
     async exportSessionSetup(sessionId: string, profileId: string = 'guest', customCarModel?: string): Promise<void> {
-        let url = `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/setup/export?profile_id=${profileId}`;
+        let url = `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/setup/export?profile_id=${profileId}&_t=${Date.now()}`;
         if (customCarModel) {
             url += `&custom_car_model=${encodeURIComponent(customCarModel)}`;
         }
@@ -223,7 +223,7 @@ export const apiClient = {
     },
 
     async exportLap(sessionId: string, lapNumber: number, profileId: string = 'guest', customCarModel?: string): Promise<void> {
-        let url = `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/export/lap/${lapNumber}?profile_id=${profileId}`;
+        let url = `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/export/lap/${lapNumber}?profile_id=${profileId}&_t=${Date.now()}`;
         if (customCarModel) {
             url += `&custom_car_model=${encodeURIComponent(customCarModel)}`;
         }
@@ -311,7 +311,7 @@ export const apiClient = {
         path: string,
         profileId: string = 'guest',
         bounds?: { x: number, y: number, width: number, height: number }
-    ): Promise<{ status: string, id?: string }> {
+    ): Promise<{ status: string, id?: string, ids?: string[] }> {
         const res = await fetch(`${API_BASE}/system/pick-and-upload?profile_id=${profileId}`, {
             method: 'POST',
             headers: mergeHeaders({ 'Content-Type': 'application/json' }),
@@ -433,6 +433,38 @@ export const apiClient = {
 
     async deleteAiMemory(id: number, profileId: string = 'guest'): Promise<void> {
         return this._fetchJson(`/ai-coach/memory/${id}?profile_id=${profileId}`, { method: 'DELETE' });
+    },
+
+    // --- Discord Telemetry Sharing ---
+    async getDiscordConfig(): Promise<{ is_configured: boolean; invite_url: string }> {
+        return this._fetchJson('/discord/config');
+    },
+
+    async shareToDiscord(
+        sessionId: string,
+        lapNumber: number,
+        title: string,
+        content: string,
+        attachSetup: boolean,
+        carClass: string,
+        customCarModel?: string,
+        profileId: string = 'guest',
+        discordHandle?: string
+    ): Promise<{ success: boolean; thread_id?: string }> {
+        return this._fetchJson(`/sessions/${sessionId}/discord/share`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                lap_number: lapNumber,
+                title,
+                content,
+                attach_setup: attachSetup,
+                car_class: carClass,
+                custom_car_model: customCarModel,
+                profile_id: profileId,
+                discord_handle: discordHandle
+            }),
+        });
     },
 
     async _fetchJson(path: string, options: RequestInit = {}): Promise<any> {

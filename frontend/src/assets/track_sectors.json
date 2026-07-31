@@ -1,0 +1,180 @@
+{
+  "Bahrain International Circuit": {
+    "Default": {
+      "S1": "left",
+      "S2": "left",
+      "S3": "right"
+    },
+    "Endurance Circuit": {
+      "S1": "left",
+      "S2": "right",
+      "S3": "right"
+    },
+    "Outer Circuit": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    },
+    "Paddock Circuit": {
+      "S1": "left",
+      "S2": "left",
+      "S3": "right"
+    }
+  },
+  "Circuit de La Sarthe": {
+    "Default": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    },
+    "Mulsanne Circuit": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Paul Ricard": {
+    "Default": {
+      "S1": "left",
+      "S2": "left",
+      "S3": "left"
+    },
+    "Layout 1A": {
+      "S1": "left",
+      "S2": "left",
+      "S3": "left"
+    },
+    "Layout 1A-V2": {
+      "S1": "left",
+      "S2": "left",
+      "S3": "left"
+    },
+    "Layout 1A-V2-Short": {
+      "S1": "left",
+      "S2": "left",
+      "S3": "left"
+    },
+    "Layout 3A": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "left"
+    }
+  },
+  "Circuit of the Americas": {
+    "Default": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    },
+    "National Circuit": {
+      "S1": "left",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Fuji Speedway": {
+    "Default": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    },
+    "Classic Circuit": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Autodromo Internazionale Enzo e Dino Ferrari": {
+    "Default": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Autodromo Jose Carlos Pace": {
+    "Default": {
+      "S1": "left",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Lusail International Circuit": {
+    "Default": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    },
+    "Short Circuit": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Autodromo Nazionale Monza": {
+    "Default": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    },
+    "Curva Grande Circuit": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Algarve International Circuit": {
+    "Default": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Sebring International Raceway": {
+    "Default": {
+      "S1": "left",
+      "S2": "left",
+      "S3": "left"
+    },
+    "School Circuit": {
+      "S1": "left",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Silverstone": {
+    "Default": {
+      "S1": "left",
+      "S2": "right",
+      "S3": "left"
+    },
+    "International Circuit": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    },
+    "National Circuit": {
+      "S1": "right",
+      "S2": "right",
+      "S3": "right"
+    }
+  },
+  "Circuit de Spa-Francorchamps": {
+    "Default": {
+      "S1": "left",
+      "S2": "right",
+      "S3": "left"
+    },
+    "Endurance Circuit": {
+      "S1": "left",
+      "S2": "right",
+      "S3": "left"
+    }
+  },
+  "Circuit de Barcelona": {
+    "Default": {
+      "S1": "left",
+      "S2": "left",
+      "S3": "right"
+    }
+  }
+}

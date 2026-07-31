@@ -11,11 +11,49 @@ import { CarInfoOverlay } from './CarInfoOverlay';
 import { LapsSelectorOverlay } from './LapsSelectorOverlay';
 import { DataChartsOverlay } from './DataChartsOverlay';
 import { MaximizedDimensionToggle } from './MaximizedDimensionToggle';
+import { MaximizedSectorToggle } from './MaximizedSectorToggle';
 import { FileManager } from './FileManager';
+import trackCorners from '../assets/track_corners.json';
+import trackSegments from '../assets/track_segments.json';
+import trackSectorsSideConfig from '../assets/track_sectors.json';
 
-import { Maximize2, Minimize2, Play, Pause, RotateCcw, Compass, Navigation, ZoomIn, ZoomOut, Activity, ChevronRight, Check, ChevronDown, ExternalLink } from 'lucide-react';
+import { Maximize2, Minimize2, Play, Pause, RotateCcw, Compass, Navigation, ZoomIn, ZoomOut, Activity, ChevronRight, ChevronLeft, Check, ChevronDown, ExternalLink, ArrowLeft } from 'lucide-react';
 
 const STICKY_THRESHOLD = 0.05;
+
+// Helper for binary searching channel index (e.g. distance/time) returning fractional index for smooth rendering
+const findIndexInChannelRange = (
+    channel: number[] | Float64Array,
+    startIdx: number,
+    endIdx: number,
+    targetValue: number
+): number => {
+    if (startIdx >= endIdx) return startIdx;
+    if (targetValue <= channel[startIdx]) return startIdx;
+    if (targetValue >= channel[endIdx]) return endIdx;
+
+    let low = startIdx;
+    let high = endIdx;
+
+    while (low <= high) {
+        const mid = (low + high) >> 1;
+        const val = channel[mid];
+        if (val === targetValue) return mid;
+        if (val < targetValue) {
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    const p1 = high;
+    const p2 = low;
+    const v1 = channel[p1];
+    const v2 = channel[p2];
+
+    if (v2 === v1 || v1 === undefined || v2 === undefined) return p1;
+    return p1 + (targetValue - v1) / (v2 - v1);
+};
 
 // Performance: Move variants outside to avoid recreation on every render
 const controlBarVariants: Variants = {
@@ -87,7 +125,74 @@ const formatLapTime = (time: number) => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
 };
 
-export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false, allowRotation = true, forcedRotation, isAnimating = false, isPopout = false }: TrackMapProps) => {
+const TopCenterTelemetryHUD = React.memo(() => {
+    const telemetryData = useTelemetryStore(state => state.telemetryData);
+    const cursorIndex = useTelemetryStore(state => state.cursorIndex);
+    const smoothCursorIndex = useTelemetryStore(state => state.smoothCursorIndex);
+    const isPlaying = useTelemetryStore(state => state.isPlaying);
+    const laps = useTelemetryStore(state => state.laps);
+    const selectedLapIdx = useTelemetryStore(state => state.selectedLapIdx);
+    const sessionMetadata = useTelemetryStore(state => state.sessionMetadata);
+
+    const carDist = useMemo(() => {
+        if (!telemetryData || cursorIndex === null || !laps.length) return null;
+        const idx = Math.floor(isPlaying ? (smoothCursorIndex ?? cursorIndex) : cursorIndex);
+
+        const dists = telemetryData['Lap Dist'] || telemetryData['Distance'];
+        if (!dists || dists[idx] === undefined) return null;
+        let dist = dists[idx];
+
+        const lapsChan = telemetryData['Lap'] || telemetryData['lap'];
+        const currentLapIdx = (lapsChan && lapsChan[idx] !== undefined)
+            ? lapsChan[idx]
+            : (selectedLapIdx !== null ? selectedLapIdx : (laps.find(l => l.isValid)?.lap ?? laps[0].lap));
+
+        if (currentLapIdx !== undefined && lapsChan) {
+            let sIdx = -1;
+            let eIdx = -1;
+            for (let i = 0; i < lapsChan.length; i++) {
+                if (lapsChan[i] == currentLapIdx) {
+                    if (sIdx === -1) sIdx = i;
+                    eIdx = i;
+                }
+            }
+            if (sIdx !== -1 && eIdx !== -1 && dists[sIdx] !== undefined && dists[eIdx] !== undefined) {
+                const actualLen = dists[eIdx] - dists[sIdx];
+                const refLen = sessionMetadata?.officialTrackLength || actualLen;
+                const stretchRatio = actualLen > 0 ? refLen / actualLen : 1;
+
+                if (idx === eIdx) {
+                    dist = refLen;
+                } else {
+                    const relDist = dist - dists[sIdx];
+                    dist = Math.max(0, relDist * stretchRatio);
+                }
+            }
+        }
+        if (dist !== null && dist < 8) {
+            dist = 0;
+        }
+        return dist;
+    }, [telemetryData, cursorIndex, smoothCursorIndex, isPlaying, laps, selectedLapIdx, sessionMetadata?.officialTrackLength]);
+
+    return (
+        <div className="bg-black/40 backdrop-blur-2xl border border-white/10 rounded-2xl flex items-center shadow-2xl glass-container overflow-hidden"
+            onMouseMove={handleGlassMouseMove}>
+            <div className="glass-content px-6 py-2.5 flex items-center">
+                <div className="flex items-baseline gap-2">
+                    <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">Dist</span>
+                    <span className="text-[18px] font-black text-blue-400 tabular-nums tracking-tighter leading-none">
+                        {carDist !== null ? Math.round(carDist) : "---"}
+                    </span>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">m</span>
+                </div>
+            </div>
+        </div>
+    );
+});
+TopCenterTelemetryHUD.displayName = 'TopCenterTelemetryHUD';
+
+export const TrackMap = React.memo(({ isExpanded = false, onToggleExpand, isMiniMap = false, allowRotation = true, forcedRotation, isAnimating = false, isPopout = false }: TrackMapProps) => {
     const telemetryData = useTelemetryStore(state => state.telemetryData);
     const referenceTelemetryData = useTelemetryStore(state => state.referenceTelemetryData);
     const selectedStint = useTelemetryStore(state => state.selectedStint);
@@ -95,16 +200,15 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
     const referenceLapIdx = useTelemetryStore(state => state.referenceLapIdx);
     const referenceLap = useTelemetryStore(state => state.referenceLap);
     const laps = useTelemetryStore(state => state.laps);
-    const cursorIndex = useTelemetryStore(state => state.cursorIndex);
-    const smoothCursorIndex = useTelemetryStore(state => state.smoothCursorIndex);
-    const playbackElapsed = useTelemetryStore(state => state.playbackElapsed);
     const setCursorIndex = useTelemetryStore(state => state.setCursorIndex);
     const zoomRange = useTelemetryStore(state => state.zoomRange);
     const isPlaying = useTelemetryStore(state => state.isPlaying);
+    const playbackElapsed = useTelemetryStore(state => state.playbackElapsed);
     const playbackSpeed = useTelemetryStore(state => state.playbackSpeed);
     const togglePlayback = useTelemetryStore(state => state.togglePlayback);
     const setPlaybackSpeed = useTelemetryStore(state => state.setPlaybackSpeed);
     const setPlaybackProgress = useTelemetryStore(state => state.setPlaybackProgress);
+    const setPlaybackTime = useTelemetryStore(state => state.setPlaybackTime);
     const cameraModeStore = useTelemetryStore(state => state.cameraMode);
     const cameraMode = (isMiniMap || !isExpanded) ? 'static' : cameraModeStore;
     const setCameraMode = useTelemetryStore(state => state.setCameraMode);
@@ -112,8 +216,6 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
     const followZoom = (isMiniMap || !isExpanded) ? 50 : storeFollowZoom;
     const setFollowZoom = useTelemetryStore(state => state.setFollowZoom);
     const dashboardSyncMode = useTelemetryStore(state => state.dashboardSyncMode);
-    const referenceCursorIndex = useTelemetryStore(state => state.referenceCursorIndex);
-    const referenceDeltaIndex = useTelemetryStore(state => state.referenceDeltaIndex);
     const sessionMetadata = useTelemetryStore(state => state.sessionMetadata);
     const referenceSessionMetadata = useTelemetryStore(state => state.referenceSessionMetadata);
     const showTelemetryOverlay = useTelemetryStore(state => state.showTelemetryOverlay);
@@ -132,6 +234,39 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
     const mapMarkerType = useTelemetryStore(state => state.mapMarkerType);
     const track3DData = useTelemetryStore(state => state.track3DData);
     const staticTrackBaseData = useTelemetryStore(state => state.staticTrackBaseData);
+    const selectedSegIdx = useTelemetryStore(state => state.selectedSegIdx);
+    const setSelectedSegIdx = useTelemetryStore(state => state.setSelectedSegIdx);
+    const selectedSectorIdx = useTelemetryStore(state => state.selectedSectorIdx);
+    const setSelectedSectorIdx = useTelemetryStore(state => state.setSelectedSectorIdx);
+    const miniSectorState = useTelemetryStore(state => state.miniSectorState);
+    const setZoomRange = useTelemetryStore(state => state.setZoomRange);
+    const setReferenceLap = useTelemetryStore(state => state.setReferenceLap);
+    const showLeftHUDs = useTelemetryStore(state => state.showLeftHUDs);
+    const show3DLab = useTelemetryStore(state => state.show3DLab);
+
+    const sessionBests = React.useMemo(() => {
+        if (!laps || laps.length === 0) return null;
+        let bestS1 = { val: Infinity, lap: 0 };
+        let bestS2 = { val: Infinity, lap: 0 };
+        let bestS3 = { val: Infinity, lap: 0 };
+        laps.forEach(l => {
+            const lapDur = l.duration !== undefined ? l.duration : (l.endTime - (l.startTime || 0));
+            if (l.isValid && !l.isOutLap && !l.inPit && lapDur > 30) {
+                if (l.s1 > 1.0 && l.s1 < bestS1.val) { bestS1 = { val: l.s1, lap: l.lap }; }
+                if (l.s2 > 1.0 && l.s2 < bestS2.val) { bestS2 = { val: l.s2, lap: l.lap }; }
+                if (l.s3 > 1.0 && l.s3 < bestS3.val) { bestS3 = { val: l.s3, lap: l.lap }; }
+            }
+        });
+        if (bestS1.val === Infinity) return null;
+        return { bestS1, bestS2, bestS3, theoreticalBest: bestS1.val + bestS2.val + bestS3.val };
+    }, [laps]);
+
+    // Render-less state updates for high-frequency cursor rendering
+    const cursorIndexRef = useRef<number | null>(useTelemetryStore.getState().cursorIndex);
+    const smoothCursorIndexRef = useRef<number | null>(useTelemetryStore.getState().smoothCursorIndex);
+    const playbackElapsedRef = useRef<number>(useTelemetryStore.getState().playbackElapsed);
+    const isPlayingRef = useRef<boolean>(useTelemetryStore.getState().isPlaying);
+    const cursorRafRef = useRef<number>(0); // rAF handle for cursor throttle
 
     const containerRef = useRef<HTMLDivElement>(null);
     const trackCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -139,6 +274,10 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
 
     const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
     const [view, setView] = useState({ x: 0, y: 0, k: 1, rotation: 0 });
+    const viewRef = useRef(view);
+    useEffect(() => {
+        viewRef.current = view;
+    }, [view]);
     const [isDragging, setIsDragging] = useState(false);
     const [isRotating, setIsRotating] = useState(false);
     const [isSpeedOpen, setIsSpeedOpen] = useState(false);
@@ -147,11 +286,17 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
     const startAngle = useRef(0);
     const startViewRotation = useRef(0);
     const startViewPos = useRef({ x: 0, y: 0 });
+    const badgeClickRegionsRef = useRef<{ index: number; x: number; y: number; r: number }[]>([]);
+    const sectorBadgeClickRegionsRef = useRef<{ index: number; x: number; y: number; r: number }[]>([]);
+    const clickStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
     const [flagImage, setFlagImage] = useState<HTMLImageElement | null>(null);
     const [isBarHovered, setIsBarHovered] = useState(false);
+    const [isSegmentLoading, setIsSegmentLoading] = useState(false);
     const showMiniMap = useTelemetryStore(state => state.showMiniMap);
     const setShowMiniMap = useTelemetryStore(state => state.setShowMiniMap);
     const setTrackMapPoppedOut = useTelemetryStore(state => state.setTrackMapPoppedOut);
+    const showMiniSectors = useTelemetryStore(state => state.showMiniSectors);
+    const setShowMiniSectors = useTelemetryStore(state => state.setShowMiniSectors);
 
     // Load Checkered Flag Icon
     useEffect(() => {
@@ -343,7 +488,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         if (!telemetryData || !laps.length || !sessionBase) return null;
         const lat = telemetryData['GPS Latitude'] || [];
         const lon = telemetryData['GPS Longitude'] || [];
-        const time = telemetryData['Time'];
+        const time = telemetryData['Time'] || telemetryData['GPS Time'];
         const inPits = telemetryData['In Pits'] || [];
         const pathLateral = telemetryData['Path Lateral'] || [];
         const trackEdge = telemetryData['Track Edge'] || [];
@@ -351,7 +496,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         const lapsInStint = laps.filter(l => l.stint === selectedStint);
         const fastestValidLap = lapsInStint.filter(l => l.isValid).sort((a, b) => a.duration - b.duration)[0] || lapsInStint[0] || laps[0];
 
-        if (!fastestValidLap || !telemetryData['Time']) return null;
+        if (!fastestValidLap || !(telemetryData['Time'] || telemetryData['GPS Time'])) return null;
 
         const stintTimeArr = time;
         const sIdx = stintTimeArr.findIndex(t => t >= fastestValidLap.startTime);
@@ -401,11 +546,12 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         if (!telemetryData || !sessionBase || !baseTrack) return null;
         const lat = telemetryData['GPS Latitude'] || [];
         const lon = telemetryData['GPS Longitude'] || [];
-        const time = telemetryData['Time'];
+        const time = telemetryData['Time'] || telemetryData['GPS Time'];
         const inPits = telemetryData['In Pits'] || [];
 
         const currentLapIdx = selectedLapIdx !== null ? selectedLapIdx : (laps.find(l => l.isValid)?.lap ?? laps[0].lap);
         const currentLap = laps.find(l => l.lap === currentLapIdx) || laps[0];
+        if (!time) return null;
         const sIdx = time.findIndex(t => t >= currentLap.startTime);
         const eIdx = time.findIndex(t => t > currentLap.endTime);
 
@@ -419,7 +565,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         if (referenceTelemetryData && referenceLap) {
             const refLat = referenceTelemetryData['GPS Latitude'] || [];
             const refLon = referenceTelemetryData['GPS Longitude'] || [];
-            const refTime = referenceTelemetryData['Time'] || [];
+            const refTime = referenceTelemetryData['Time'] || referenceTelemetryData['GPS Time'] || [];
             const refInPits = referenceTelemetryData['In Pits'] || [];
             const sIdx = refTime.findIndex(t => t >= referenceLap.startTime);
             const eIdx = refTime.findIndex(t => t > referenceLap.startTime + referenceLap.duration);
@@ -431,7 +577,8 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         } else if (referenceLapIdx !== null) {
             const refLap = laps.find(l => l.lap === referenceLapIdx);
             if (refLap && telemetryData) {
-                const time = telemetryData['Time'];
+                const time = telemetryData['Time'] || telemetryData['GPS Time'];
+                if (!time) return null;
                 const sIdx = time.findIndex(t => t >= refLap.startTime);
                 const eIdx = time.findIndex(t => t > refLap.endTime);
                 const startIdx = Math.max(0, sIdx);
@@ -444,47 +591,584 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         return null;
     }, [telemetryData, referenceTelemetryData, referenceLap, referenceLapIdx, laps, sessionBase, baseTrack, processGeometry]);
 
+    // 1e2. Auto Compare Line Geometry for Implicit Mini-sector Comparison when Ref is None
+    // 1e2. Auto Compare Line Geometry for Implicit Mini-sector/Sector Comparison when Ref is None
+    const autoCompareLineData = useMemo(() => {
+        if (!sessionBase || !baseTrack || !telemetryData || (referenceTelemetryData && referenceLap) || referenceLapIdx !== null) {
+            return null;
+        }
+
+        const timeChan = telemetryData['Time'] || telemetryData['GPS Time'];
+        if (!timeChan) return null;
+
+        if (selectedSegIdx !== null && miniSectorState?.sessionMiniSectorBests) {
+            const best = miniSectorState.sessionMiniSectorBests.bests[selectedSegIdx];
+            if (!best) return null;
+
+            const bestLapNum = best.lap;
+            const bestLapTimes = miniSectorState.allLapsMiniSectorTimes?.[bestLapNum];
+            const bestLapSegTime = bestLapTimes?.[selectedSegIdx];
+            if (!bestLapSegTime) return null;
+
+            const startIdx = Math.max(0, bestLapSegTime.startIdx);
+            const endIdx = Math.min(timeChan.length - 1, bestLapSegTime.endIdx);
+
+            if (startIdx >= endIdx || endIdx < 0) return null;
+
+            return processGeometry(
+                startIdx,
+                endIdx,
+                false,
+                telemetryData['GPS Latitude'],
+                telemetryData['GPS Longitude'],
+                telemetryData['In Pits']
+            );
+        } else if (selectedSectorIdx !== null && sessionBests && laps) {
+            const bestLapNum = selectedSectorIdx === 0
+                ? sessionBests.bestS1?.lap
+                : selectedSectorIdx === 1
+                ? sessionBests.bestS2?.lap
+                : selectedSectorIdx === 2
+                ? sessionBests.bestS3?.lap
+                : undefined;
+
+            if (bestLapNum === undefined) return null;
+
+            const bestLap = laps.find(l => l.lap === bestLapNum);
+            if (!bestLap || bestLap.s1 === undefined || bestLap.s2 === undefined || bestLap.s3 === undefined) return null;
+
+            let startElapsed = 0;
+            let endElapsed = 0;
+            if (selectedSectorIdx === 0) {
+                startElapsed = 0;
+                endElapsed = bestLap.s1;
+            } else if (selectedSectorIdx === 1) {
+                startElapsed = bestLap.s1;
+                endElapsed = bestLap.s1 + bestLap.s2;
+            } else if (selectedSectorIdx === 2) {
+                startElapsed = bestLap.s1 + bestLap.s2;
+                endElapsed = bestLap.duration;
+            }
+
+            const absStart = bestLap.startTime + startElapsed;
+            const absEnd = bestLap.startTime + endElapsed;
+
+            let refLineS = -1;
+            for (let i = 0; i < timeChan.length; i++) {
+                if (telemetryData['Lap']?.[i] === bestLapNum) {
+                    refLineS = i;
+                    break;
+                }
+            }
+            if (refLineS === -1) return null;
+
+            const startIdx = findIndexInChannelRange(timeChan, refLineS, timeChan.length - 1, absStart);
+            const endIdx = findIndexInChannelRange(timeChan, refLineS, timeChan.length - 1, absEnd);
+
+            if (startIdx >= endIdx || endIdx < 0) return null;
+
+            return processGeometry(
+                startIdx,
+                endIdx,
+                false,
+                telemetryData['GPS Latitude'],
+                telemetryData['GPS Longitude'],
+                telemetryData['In Pits']
+            );
+        }
+
+        return null;
+    }, [telemetryData, miniSectorState, selectedSegIdx, selectedSectorIdx, sessionBests, laps, selectedLapIdx, referenceTelemetryData, referenceLap, referenceLapIdx, sessionBase, baseTrack, processGeometry]);
+
+    // 1e3. Synchronized index for autoCompare ghost car (Implicit comparison when reference is None)
+    const getAutoCompareSyncIdx = useCallback(() => {
+        if (!telemetryData || !laps) return null;
+        const times = telemetryData['Time'] || telemetryData['GPS Time'];
+        const lapChan = telemetryData['Lap'];
+        const activeCursorIdx = isPlayingRef.current ? (smoothCursorIndexRef.current ?? cursorIndexRef.current) : cursorIndexRef.current;
+        if (activeCursorIdx === null || !times || !lapChan) return null;
+
+        const currentLapIdx = selectedLapIdx !== null ? selectedLapIdx : (laps.find(l => l.isValid)?.lap ?? laps[0].lap);
+        const currentLap = laps.find(l => l.lap === currentLapIdx);
+        if (!currentLap) return null;
+
+        if (selectedSegIdx !== null && miniSectorState?.sessionMiniSectorBests) {
+            const best = miniSectorState.sessionMiniSectorBests.bests[selectedSegIdx];
+            if (!best) return null;
+
+            const bestLapNum = best.lap;
+            const bestLapTimes = miniSectorState.allLapsMiniSectorTimes?.[bestLapNum];
+            const bestLapSegTime = bestLapTimes?.[selectedSegIdx];
+            if (!bestLapSegTime) return null;
+
+            const bestLap = laps.find(l => l.lap === bestLapNum);
+            if (!bestLap) return null;
+
+            // Helper for fractional array interpolation
+            const getInterpolatedVal = (arr: number[] | Float64Array) => {
+                const base = Math.floor(activeCursorIdx);
+                const frac = activeCursorIdx - base;
+                const v1 = arr[base];
+                if (v1 === undefined) return 0;
+                const v2 = arr[base + 1] ?? v1;
+                return v1 + (v2 - v1) * frac;
+            };
+
+            let curLineS = -1;
+            for (let i = 0; i < lapChan.length; i++) {
+                if (lapChan[i] === currentLapIdx) { curLineS = i; break; }
+            }
+            if (curLineS === -1) return null;
+
+            let refLineS = -1;
+            let refLineE = -1;
+            for (let i = 0; i < lapChan.length; i++) {
+                if (lapChan[i] === bestLapNum) {
+                    if (refLineS === -1) refLineS = i;
+                    refLineE = i;
+                } else if (refLineS !== -1 && lapChan[i] > bestLapNum) {
+                    break;
+                }
+            }
+            if (refLineS === -1) return null;
+            if (refLineE === -1) refLineE = times.length - 1;
+
+            const currentLapTimes = miniSectorState.currentLapMiniSectorTimes;
+            const currentLapSegTime = currentLapTimes?.[selectedSegIdx];
+
+            const curTime = getInterpolatedVal(times);
+
+            if (currentLapSegTime && bestLapSegTime) {
+                const curSegStartTime = times[currentLapSegTime.startIdx] || 0;
+                const curSegPassedTime = curTime - curSegStartTime;
+
+                const refSegStartTime = times[bestLapSegTime.startIdx] || 0;
+                const targetRefTime = refSegStartTime + curSegPassedTime;
+                return findIndexInChannelRange(times, bestLapSegTime.startIdx, bestLapSegTime.endIdx, targetRefTime);
+            } else {
+                const curTimeOffset = curTime - times[curLineS];
+                const targetRefTime = times[refLineS] + curTimeOffset;
+                return findIndexInChannelRange(times, refLineS, refLineE, targetRefTime);
+            }
+        } else if (selectedSectorIdx !== null && sessionBests) {
+            const bestLapNum = selectedSectorIdx === 0
+                ? sessionBests.bestS1?.lap
+                : selectedSectorIdx === 1
+                ? sessionBests.bestS2?.lap
+                : selectedSectorIdx === 2
+                ? sessionBests.bestS3?.lap
+                : undefined;
+
+            if (bestLapNum === undefined) return null;
+            const bestLap = laps.find(l => l.lap === bestLapNum);
+            if (!bestLap || bestLap.s1 === undefined || bestLap.s2 === undefined || bestLap.s3 === undefined) return null;
+            if (currentLap.s1 === undefined || currentLap.s2 === undefined || currentLap.s3 === undefined) return null;
+
+            // Helper for fractional array interpolation
+            const getInterpolatedVal = (arr: number[] | Float64Array) => {
+                const base = Math.floor(activeCursorIdx);
+                const frac = activeCursorIdx - base;
+                const v1 = arr[base];
+                if (v1 === undefined) return 0;
+                const v2 = arr[base + 1] ?? v1;
+                return v1 + (v2 - v1) * frac;
+            };
+
+            let curLineS = -1;
+            for (let i = 0; i < lapChan.length; i++) {
+                if (lapChan[i] === currentLapIdx) { curLineS = i; break; }
+            }
+            if (curLineS === -1) return null;
+
+            let refLineS = -1;
+            for (let i = 0; i < lapChan.length; i++) {
+                if (lapChan[i] === bestLapNum) { refLineS = i; break; }
+            }
+            if (refLineS === -1) return null;
+
+            let curSegStartIdx = 0;
+            let curSegEndIdx = 0;
+            let refSegStartIdx = 0;
+            let refSegEndIdx = 0;
+
+            if (selectedSectorIdx === 0) {
+                curSegStartIdx = curLineS;
+                curSegEndIdx = findIndexInChannelRange(times, curLineS, times.length - 1, currentLap.startTime + currentLap.s1);
+                
+                refSegStartIdx = refLineS;
+                refSegEndIdx = findIndexInChannelRange(times, refLineS, times.length - 1, bestLap.startTime + bestLap.s1);
+            } else if (selectedSectorIdx === 1) {
+                curSegStartIdx = findIndexInChannelRange(times, curLineS, times.length - 1, currentLap.startTime + currentLap.s1);
+                curSegEndIdx = findIndexInChannelRange(times, curLineS, times.length - 1, currentLap.startTime + currentLap.s1 + currentLap.s2);
+                
+                refSegStartIdx = findIndexInChannelRange(times, refLineS, times.length - 1, bestLap.startTime + bestLap.s1);
+                refSegEndIdx = findIndexInChannelRange(times, refLineS, times.length - 1, bestLap.startTime + bestLap.s1 + bestLap.s2);
+            } else if (selectedSectorIdx === 2) {
+                curSegStartIdx = findIndexInChannelRange(times, curLineS, times.length - 1, currentLap.startTime + currentLap.s1 + currentLap.s2);
+                curSegEndIdx = findIndexInChannelRange(times, curLineS, times.length - 1, currentLap.startTime + currentLap.duration);
+                
+                refSegStartIdx = findIndexInChannelRange(times, refLineS, times.length - 1, bestLap.startTime + bestLap.s1 + bestLap.s2);
+                refSegEndIdx = findIndexInChannelRange(times, refLineS, times.length - 1, bestLap.startTime + bestLap.duration);
+            }
+
+            const curTime = getInterpolatedVal(times);
+            const curSegStartTime = times[curSegStartIdx] || 0;
+            const curSegPassedTime = curTime - curSegStartTime;
+
+            const refSegStartTime = times[refSegStartIdx] || 0;
+            const targetRefTime = refSegStartTime + curSegPassedTime;
+            return findIndexInChannelRange(times, refSegStartIdx, refSegEndIdx, targetRefTime);
+        }
+
+        return null;
+    }, [telemetryData, selectedSegIdx, selectedSectorIdx, sessionBests, miniSectorState, selectedLapIdx, laps]);
+
     // 1f. Consolidated Track Data
     const trackData = useMemo(() => {
         if (!baseTrack || !racingLineData) return null;
         return {
             ...baseTrack,
             racingLine: racingLineData,
-            referenceRacingLine: referenceLineData,
+            referenceRacingLine: referenceLineData || autoCompareLineData,
             center: sessionBase!
         };
-    }, [baseTrack, racingLineData, referenceLineData, sessionBase]);
+    }, [baseTrack, racingLineData, referenceLineData, autoCompareLineData, sessionBase]);
+
+    const getHeadingAtIdx = useCallback((idx: number, sourceData: any) => {
+        if (!trackData) return 0;
+        const lat = sourceData['GPS Latitude'];
+        const lon = sourceData['GPS Longitude'];
+        if (!lat || !lon) return 0;
+        const windowVal = 15;
+        const i1 = Math.max(0, Math.floor(idx) - windowVal);
+        const i2 = Math.min(lat.length - 1, Math.floor(idx) + windowVal);
+        if (i1 === i2) return 0;
+        const dLat = lat[i2] - lat[i1];
+        const dLon = (lon[i2] - lon[i1]) * trackData.center.lonScale;
+        let heading = Math.atan2(dLon, dLat) * 180 / Math.PI;
+
+        const speed = sourceData['Ground Speed'];
+        const gLat = sourceData['G Force Lat'];
+        if (speed && gLat) {
+            const curSpeedKmh = speed[Math.floor(idx)];
+            const curGLat = gLat[Math.floor(idx)];
+            if (curSpeedKmh >= 3.0) {
+                const v_mps = curSpeedKmh / 3.6;
+                const slipOffset = (curGLat * 9.81 / (v_mps * v_mps)) * (180 / Math.PI) * 0.5;
+                heading += Math.max(-15, Math.min(15, slipOffset));
+            }
+        }
+        return heading;
+    }, [trackData]);
+
+    // --- Dynamic Sizing and View Management ---
+    const trackName = sessionMetadata?.trackName;
+    const layoutName = sessionMetadata?.layoutKey || sessionMetadata?.trackLayout || 'Default';
+
+    const corners = useMemo(() => {
+        if (!trackName || !trackCorners) {
+            console.log("[TrackMap] No trackName or trackCorners available");
+            return [];
+        }
+
+        // Helper to normalize and strip accents & punctuation from track names for comparison
+        const cleanTrackName = (name: string) => {
+            return name
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "") // Strip accents (convert Autódromo to Autodromo, José to Jose)
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, ' ') // Punctuation to space
+                .trim();
+        };
+
+        const targetTrackClean = cleanTrackName(trackName);
+
+        // Find track by exact match, normalized match, or fuzzy word overlap match
+        let trackKey = Object.keys(trackCorners).find(
+            key => key.toLowerCase() === trackName.toLowerCase()
+        );
+
+        if (!trackKey) {
+            trackKey = Object.keys(trackCorners).find(
+                key => cleanTrackName(key) === targetTrackClean
+            );
+        }
+
+        if (!trackKey) {
+            // Fuzzy match: check if key and trackName share a high percentage of words
+            trackKey = Object.keys(trackCorners).find(key => {
+                const keyClean = cleanTrackName(key);
+                const keyWords = keyClean.split(/\s+/).filter(w => w.length > 2);
+                const targetWords = targetTrackClean.split(/\s+/).filter(w => w.length > 2);
+                const overlap = keyWords.filter(w => targetWords.includes(w));
+                const threshold = Math.min(keyWords.length, targetWords.length) * 0.7; // 70% word overlap
+                return overlap.length >= threshold;
+            });
+        }
+
+        console.log(`[TrackMap] Matching trackName: "${trackName}" -> Key: "${trackKey}"`);
+
+        if (!trackKey) return [];
+
+        const layouts = (trackCorners as any)[trackKey];
+        if (!layouts) return [];
+
+        // Helper to normalize layout names by stripping track name words and non-alphanumeric characters
+        const normalize = (lName: string) => {
+            let clean = cleanTrackName(lName);
+            // Split trackName into words and remove them
+            const trackWords = cleanTrackName(trackName).split(/\s+/);
+            trackWords.forEach(word => {
+                if (word.length > 2) { // only filter out meaningful words
+                    const escaped = word.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+                    clean = clean.replace(new RegExp(`\\b${escaped}\\b`, 'g'), '');
+                }
+            });
+            return clean.replace(/[^a-z0-9]/g, '').trim();
+        };
+
+        const targetNormalized = normalize(layoutName);
+
+        // Try exact match first
+        let layoutKey = Object.keys(layouts).find(
+            key => key.toLowerCase() === layoutName.toLowerCase()
+        );
+
+        // Try normalized match next
+        if (!layoutKey) {
+            layoutKey = Object.keys(layouts).find(
+                key => normalize(key) === targetNormalized
+            );
+        }
+
+        // Fallback to layout containing the layoutName or contained by it
+        if (!layoutKey) {
+            layoutKey = Object.keys(layouts).find(
+                key => {
+                    const kClean = cleanTrackName(key);
+                    const lClean = cleanTrackName(layoutName);
+                    return kClean.includes(lClean) || lClean.includes(kClean);
+                }
+            );
+        }
+
+        // Fallback to first layout
+        const fallbackUsed = !layoutKey;
+        layoutKey = layoutKey || Object.keys(layouts)[0];
+
+        console.log(`[TrackMap] Matching layoutName: "${layoutName}" -> Key: "${layoutKey}" (Fallback used: ${fallbackUsed})`);
+
+        const resultCorners = layouts[layoutKey] || [];
+        console.log(`[TrackMap] Found ${resultCorners.length} corners for ${trackKey} [${layoutKey}]`);
+        return resultCorners;
+    }, [trackName, layoutName]);
+
+    const miniSectors = useMemo(() => {
+        if (!trackName || !trackSegments) {
+            console.log("[TrackMap] No trackName or trackSegments available");
+            return [];
+        }
+
+        const cleanTrackName = (name: string) => {
+            return name
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, ' ')
+                .trim();
+        };
+
+        const targetTrackClean = cleanTrackName(trackName);
+
+        let trackKey = Object.keys(trackSegments).find(
+            key => key.toLowerCase() === trackName.toLowerCase()
+        );
+
+        if (!trackKey) {
+            trackKey = Object.keys(trackSegments).find(
+                key => cleanTrackName(key) === targetTrackClean
+            );
+        }
+
+        if (!trackKey) {
+            trackKey = Object.keys(trackSegments).find(key => {
+                const keyClean = cleanTrackName(key);
+                const keyWords = keyClean.split(/\s+/).filter(w => w.length > 2);
+                const targetWords = targetTrackClean.split(/\s+/).filter(w => w.length > 2);
+                const overlap = keyWords.filter(w => targetWords.includes(w));
+                const threshold = Math.min(keyWords.length, targetWords.length) * 0.7;
+                return overlap.length >= threshold;
+            });
+        }
+
+        console.log(`[TrackMap] Matching trackName for segments: "${trackName}" -> Key: "${trackKey}"`);
+
+        if (!trackKey) return [];
+
+        const layouts = (trackSegments as any)[trackKey];
+        if (!layouts) return [];
+
+        const normalize = (lName: string) => {
+            let clean = cleanTrackName(lName);
+            const trackWords = cleanTrackName(trackName).split(/\s+/);
+            trackWords.forEach(word => {
+                if (word.length > 2) {
+                    const escaped = word.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+                    clean = clean.replace(new RegExp(`\\b${escaped}\\b`, 'g'), '');
+                }
+            });
+            return clean.replace(/[^a-z0-9]/g, '').trim();
+        };
+
+        const targetNormalized = normalize(layoutName);
+
+        let layoutKey = Object.keys(layouts).find(
+            key => key.toLowerCase() === layoutName.toLowerCase()
+        );
+
+        if (!layoutKey) {
+            layoutKey = Object.keys(layouts).find(
+                key => normalize(key) === targetNormalized
+            );
+        }
+
+        if (!layoutKey) {
+            layoutKey = Object.keys(layouts).find(
+                key => {
+                    const kClean = cleanTrackName(key);
+                    const lClean = cleanTrackName(layoutName);
+                    return kClean.includes(lClean) || lClean.includes(kClean);
+                }
+            );
+        }
+
+        const fallbackUsed = !layoutKey;
+        layoutKey = layoutKey || Object.keys(layouts)[0];
+
+        console.log(`[TrackMap] Matching layoutName for segments: "${layoutName}" -> Key: "${layoutKey}" (Fallback used: ${fallbackUsed})`);
+
+        const layoutData = layouts[layoutKey];
+        const resultSegments = layoutData ? (layoutData.segments || []) : [];
+        console.log(`[TrackMap] Found ${resultSegments.length} segments for ${trackKey} [${layoutKey}]`);
+        return resultSegments;
+    }, [trackName, layoutName]);
+
+    const sectorBadgeSides = useMemo(() => {
+        if (!trackName || !trackSectorsSideConfig) {
+            return { S1: 'right', S2: 'right', S3: 'right' };
+        }
+
+        const cleanTrackName = (name: string) => {
+            return name
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, ' ')
+                .trim();
+        };
+
+        const targetTrackClean = cleanTrackName(trackName);
+
+        let trackKey = Object.keys(trackSectorsSideConfig).find(
+            key => key.toLowerCase() === trackName.toLowerCase()
+        );
+
+        if (!trackKey) {
+            trackKey = Object.keys(trackSectorsSideConfig).find(
+                key => cleanTrackName(key) === targetTrackClean
+            );
+        }
+
+        if (!trackKey) {
+            trackKey = Object.keys(trackSectorsSideConfig).find(key => {
+                const keyClean = cleanTrackName(key);
+                const keyWords = keyClean.split(/\s+/).filter(w => w.length > 2);
+                const targetWords = targetTrackClean.split(/\s+/).filter(w => w.length > 2);
+                const overlap = keyWords.filter(w => targetWords.includes(w));
+                const threshold = Math.min(keyWords.length, targetWords.length) * 0.7;
+                return overlap.length >= threshold;
+            });
+        }
+
+        if (!trackKey) return { S1: 'right', S2: 'right', S3: 'right' };
+
+        const layouts = (trackSectorsSideConfig as any)[trackKey];
+        if (!layouts) return { S1: 'right', S2: 'right', S3: 'right' };
+
+        const normalize = (lName: string) => {
+            let clean = cleanTrackName(lName);
+            const trackWords = cleanTrackName(trackName).split(/\s+/);
+            trackWords.forEach(word => {
+                if (word.length > 2) {
+                    const escaped = word.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+                    clean = clean.replace(new RegExp(`\\b${escaped}\\b`, 'g'), '');
+                }
+            });
+            return clean.replace(/\s+/g, ' ').trim();
+        };
+
+        let layoutKey = Object.keys(layouts).find(
+            key => key.toLowerCase() === (layoutName || 'default').toLowerCase()
+        );
+        if (!layoutKey) {
+            const cleanTarget = normalize(layoutName || 'default');
+            layoutKey = Object.keys(layouts).find(
+                key => normalize(key) === cleanTarget
+            );
+        }
+        if (!layoutKey) {
+            layoutKey = Object.keys(layouts).find(
+                key => key.toLowerCase() === 'default'
+            );
+        }
+
+        const layoutConfig = layoutKey ? layouts[layoutKey] : null;
+        return {
+            S1: (layoutConfig?.S1 === 'left' || layoutConfig?.S1 === 'right') ? layoutConfig.S1 : 'right',
+            S2: (layoutConfig?.S2 === 'left' || layoutConfig?.S2 === 'right') ? layoutConfig.S2 : 'right',
+            S3: (layoutConfig?.S3 === 'left' || layoutConfig?.S3 === 'right') ? layoutConfig.S3 : 'right'
+        };
+    }, [trackName, layoutName]);
 
     // 1g. Sector-based performance coloring for Minimap
     const sectorsSource = (track3DData || staticTrackBaseData)?.trackSectors;
 
     const sectorColors = useMemo(() => {
-        // Must have both a selected lap and a reference lap (either cross-session or same-session)
-        const hasReference = referenceLap !== null || referenceLapIdx !== null;
-        if (!hasReference || selectedLapIdx === null || !laps) return null;
+        if (selectedLapIdx === null || !laps) return null;
 
         const currentLap = laps.find(l => l.lap === selectedLapIdx);
         if (!currentLap) return null;
 
-        // Determine reference lap object
+        const hasReference = referenceLap !== null || referenceLapIdx !== null;
         const refLapObj = referenceLap || laps.find(l => l.lap === referenceLapIdx);
-        if (!refLapObj) return null;
 
         const colors: Record<number, string> = {};
         [1, 2, 3].forEach(s => {
             const cur = currentLap[`s${s}` as keyof Lap] as number;
-            const ref = refLapObj[`s${s}` as keyof Lap] as number;
-            
-            if (typeof cur === 'number' && typeof ref === 'number' && cur > 0 && ref > 0) {
-                if (cur < ref - 0.001) colors[s - 1] = '#3b82f6'; // Blue
-                else if (cur > ref + 0.001) colors[s - 1] = '#fbbf24'; // Orange
-                else colors[s - 1] = '#ffffff'; // White
+
+            if (hasReference && refLapObj) {
+                const ref = refLapObj[`s${s}` as keyof Lap] as number;
+                if (typeof cur === 'number' && typeof ref === 'number' && cur > 0 && ref > 0) {
+                    if (cur < ref - 0.001) colors[s - 1] = '#3b82f6'; // Blue
+                    else if (cur > ref + 0.001) colors[s - 1] = '#fbbf24'; // Yellow
+                    else colors[s - 1] = '#ffffff'; // White
+                } else {
+                    colors[s - 1] = 'rgba(150, 150, 150, 0.8)';
+                }
+            } else if (!hasReference && sessionBests) {
+                const bestVal = s === 1 ? sessionBests.bestS1?.val : s === 2 ? sessionBests.bestS2?.val : sessionBests.bestS3?.val;
+                if (typeof cur === 'number' && typeof bestVal === 'number' && cur > 0 && bestVal > 0) {
+                    if (cur <= bestVal + 0.001) colors[s - 1] = '#ffffff'; // White
+                    else colors[s - 1] = '#fb923c'; // Orange
+                } else {
+                    colors[s - 1] = 'rgba(150, 150, 150, 0.8)';
+                }
             } else {
                 colors[s - 1] = 'rgba(150, 150, 150, 0.8)';
             }
         });
         return colors;
-    }, [laps, selectedLapIdx, referenceLap, referenceLapIdx]);
+    }, [laps, selectedLapIdx, referenceLap, referenceLapIdx, sessionBests]);
 
     const sectorBreakpoints = useMemo(() => {
         if (!trackData?.racingLine || !sectorsSource || sectorsSource.length === 0) return null;
@@ -515,31 +1199,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         return detectCorners(trackData.referenceTrack.points, { mergeDistance: 80 / degM });
     }, [trackData]);
 
-    // 2. Calculate Car Heading from GPS (Smooth window)
-    const carHeading = useMemo(() => {
-        if (!trackData || cursorIndex === null || !telemetryData) return 0;
-
-        const lat = telemetryData['GPS Latitude'];
-        const lon = telemetryData['GPS Longitude'];
-        if (!lat || !lon) return 0;
-
-        const idx = Math.floor(isPlaying ? (smoothCursorIndex ?? cursorIndex) : cursorIndex);
-
-        // Window for smoothing (e.g., +- 0.5s or 10-20 points)
-        const window = 15;
-        const i1 = Math.max(0, idx - window);
-        const i2 = Math.min(lat.length - 1, idx + window);
-
-        if (i1 === i2) return 0;
-
-        const dLat = lat[i2] - lat[i1];
-        const dLon = (lon[i2] - lon[i1]) * trackData.center.lonScale;
-
-        // Heading in degrees (0 is Up/North)
-        // Note: Canvas uses Y as down, so we atan2(lon, -lat) or adjust.
-        // Actually, our projection is lat+ and lon+.
-        return Math.atan2(dLon, dLat) * 180 / Math.PI;
-    }, [trackData, cursorIndex, smoothCursorIndex, isPlaying, telemetryData]);
+    // 2. Car Heading is calculated locally within render loops now to save React lifecycle overhead
 
     const isSingleLap = useMemo(() => {
         const reliesOnExternalData = !!(referenceTelemetryData && referenceLap);
@@ -638,7 +1298,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         return Math.max(0.6, Math.min(1.6, ratio));
     }, [trackData, optimalRotation]);
 
-    const fitTrack = useCallback(() => {
+    const fitTrack = useCallback((animated = false) => {
         if (!trackData || dimensions.width === 0) return;
 
         // Reset follow zoom if in follow modes
@@ -670,28 +1330,69 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
             if (ry < minRY) minRY = ry; if (ry > maxRY) maxRY = ry;
         }
 
-        const bW = (maxRX - minRX) * 1.05, bH = (maxRY - minRY) * 1.05; // 5% buffer
+        // Increase buffer to 22% to prevent segment badges from being cut off at the map edges
+        const bW = (maxRX - minRX) * 1.22, bH = (maxRY - minRY) * 1.22;
         const finalK = Math.min(Math.min(availW / Math.max(1e-10, bW), availH / Math.max(1e-10, bH)), 1000000);
 
         const offsetX = (pLeft - pRight) / 2;
         const offsetY = (pTop - pBottom) / 2;
 
-        setView(v => ({
-            ...v,
-            x: -(((minRX + maxRX) / 2) * finalK) + offsetX,
-            y: -(((minRY + maxRY) / 2) * finalK) + offsetY,
-            k: finalK,
-            rotation: activeRotation
-        }));
-    }, [trackData, dimensions, optimalRotation, forcedRotation, isExpanded, isMiniMap]);
+        const targetX = -(((minRX + maxRX) / 2) * finalK) + offsetX;
+        const targetY = -(((minRY + maxRY) / 2) * finalK) + offsetY;
+        const targetK = finalK;
+
+        if (animated && viewRef.current) {
+            const startX = viewRef.current.x;
+            const startY = viewRef.current.y;
+            const startK = viewRef.current.k;
+            const startRotation = viewRef.current.rotation ?? activeRotation;
+
+            const duration = 400; // ms
+            const startTime = performance.now();
+
+            const step = (currentTime: number) => {
+                const elapsed = currentTime - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+                
+                // Ease out cubic
+                const ease = 1 - Math.pow(1 - progress, 3);
+
+                setView({
+                    x: startX + (targetX - startX) * ease,
+                    y: startY + (targetY - startY) * ease,
+                    k: startK + (targetK - startK) * ease,
+                    rotation: startRotation + (activeRotation - startRotation) * ease
+                });
+
+                if (progress < 1) {
+                    requestAnimationFrame(step);
+                }
+            };
+            requestAnimationFrame(step);
+        } else {
+            setView({
+                x: targetX,
+                y: targetY,
+                k: targetK,
+                rotation: activeRotation
+            });
+        }
+    }, [trackData, dimensions, optimalRotation, forcedRotation, isExpanded, isMiniMap, cameraMode]);
 
     useEffect(() => {
         if (isAnimating) return; // Skip fitting during animation
         fitTrack();
     }, [fitTrack, selectedLapIdx, dimensions.width, dimensions.height, isExpanded, isMiniMap, forcedRotation, isAnimating]); // Re-fit on resize, mode, or forced rotation change
 
-    // 3. Handle Sync Zoom from Telemetry Selection
+    // Reset view to full track when no segment/sector is selected (e.g. on mode switches)
     useEffect(() => {
+        if (selectedSegIdx === null && selectedSectorIdx === null) {
+            fitTrack(true);
+        }
+    }, [selectedSegIdx, selectedSectorIdx, fitTrack]);
+
+    // 3. Main Track Rendering (Render-heavy, cached to canvas)
+    const drawTrack = useCallback(() => {
         if (isMiniMap) return; // Disable zoom sync for mini map
 
         if (!zoomRange || !trackData || dimensions.width === 0) {
@@ -731,8 +1432,9 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
 
         if (!found) return;
 
-        const w = (maxRX - minRX) * 1.04; // Add small buffer
-        const h = (maxRY - minRY) * 1.04;
+        // Increase buffer to 20% to prevent segment badges from being cut off during local zoom
+        const w = (maxRX - minRX) * 1.20;
+        const h = (maxRY - minRY) * 1.20;
         const centerRX = (minRX + maxRX) / 2;
         const centerRY = (minRY + maxRY) / 2;
 
@@ -771,6 +1473,9 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
+        // Clear click regions at start of render frame
+        badgeClickRegionsRef.current = [];
+
         const { width, height } = dimensions;
         if (width === 0 || height === 0) return;
 
@@ -783,7 +1488,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         let effRot = view.rotation;
 
         const isFollowMode = !isMiniMap && cameraMode !== 'static';
-        const activeIdx = isPlaying ? (smoothCursorIndex ?? cursorIndex) : cursorIndex;
+        const activeIdx = isPlayingRef.current ? (smoothCursorIndexRef.current ?? cursorIndexRef.current) : cursorIndexRef.current;
 
         if (isFollowMode && activeIdx !== null) {
             const baseIdx = Math.floor(activeIdx);
@@ -803,7 +1508,8 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                 effK = 10000 + followZoom * 5000;
 
                 // Rotation Smoothing (Lerp)
-                const targetRot = cameraMode === 'heading-up' ? -carHeading : (forcedRotation ?? optimalRotation);
+                const heading = getHeadingAtIdx(activeIdx, telemetryData);
+                const targetRot = cameraMode === 'heading-up' ? -heading : (forcedRotation ?? optimalRotation);
                 // Simple circular lerp for rotation
                 let diff = (targetRot - smoothRotation.current) % 360;
                 if (diff > 180) diff -= 360;
@@ -851,14 +1557,71 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         ctx.rotate(activeRotation * Math.PI / 180);
         ctx.scale(k, -k);
 
+        // Helper to determine sector index for a given point index `i` (downsampled)
+        const getSectorIdxForPoint = (i: number, totalLen: number) => {
+            if (!sectorBreakpoints || sectorBreakpoints.length < 2) {
+                if (i < totalLen / 3) return 0;
+                if (i < totalLen * 2 / 3) return 1;
+                return 2;
+            }
+            const sortedBreakpoints = [...sectorBreakpoints].sort((a, b) => a.id - b.id);
+            const bpFinish = sortedBreakpoints.find(b => b.id === 0);
+            const bpS1 = sortedBreakpoints.find(b => b.id === 1);
+            const bpS2 = sortedBreakpoints.find(b => b.id === 2);
+
+            const s1Start = bpFinish ? bpFinish.index : 0;
+            const s1End = bpS1 ? bpS1.index : Math.floor(totalLen / 3);
+            const s2Start = s1End;
+            const s2End = bpS2 ? bpS2.index : Math.floor(totalLen * 2 / 3);
+
+            // Sector 1 check
+            const inS1 = s1Start <= s1End
+                ? (i >= s1Start && i <= s1End)
+                : (i >= s1Start || i <= s1End);
+            if (inS1) return 0;
+
+            // Sector 2 check
+            const inS2 = s2Start <= s2End
+                ? (i >= s2Start && i <= s2End)
+                : (i >= s2Start || i <= s2End);
+            if (inS2) return 1;
+
+            return 2; // Sector 3
+        };
+
         // --- 1. Draw Reference Track Surface (Filled Area) ---
         if (referenceTrack.leftEdges.length > 1) {
             ctx.fillStyle = '#0a0a0c'; // Much darker track surface
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'; // Subtle borders
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)'; // Brighter borders for better visibility
             ctx.lineWidth = 3 / k; // Thicker border
 
             for (let i = 0; i < referenceTrack.leftEdges.length - 1; i++) {
                 if (!referenceTrack.drawFlags[i] || !referenceTrack.drawFlags[i + 1]) continue;
+
+                let isFaded = false;
+                if (selectedSegIdx !== null) {
+                    const lapsInStint = laps.filter(l => l.stint === selectedStint);
+                    const fastestValidLap = lapsInStint.filter(l => l.isValid).sort((a, b) => a.duration - b.duration)[0] || lapsInStint[0] || laps[0];
+                    const baseTrackLapTimes = miniSectorState?.allLapsMiniSectorTimes?.[fastestValidLap?.lap];
+                    const baseTrackSegTime = baseTrackLapTimes?.[selectedSegIdx];
+                    if (baseTrackSegTime) {
+                        const idx = referenceTrack.originalIndices[i];
+                        if (idx < baseTrackSegTime.startIdx || idx > baseTrackSegTime.endIdx) {
+                            isFaded = true;
+                        }
+                    }
+                } else if (selectedSectorIdx !== null && sectorBreakpoints && sectorBreakpoints.length >= 2) {
+                    const ptSectorIdx = getSectorIdxForPoint(i, referenceTrack.leftEdges.length);
+                    if (ptSectorIdx !== selectedSectorIdx) {
+                        isFaded = true;
+                    }
+                }
+
+                if (isFaded) {
+                    ctx.globalAlpha = 0.015;
+                } else {
+                    ctx.globalAlpha = 1.0;
+                }
 
                 const l1 = referenceTrack.leftEdges[i];
                 const l2 = referenceTrack.leftEdges[i + 1];
@@ -871,10 +1634,13 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                 ctx.lineTo(r2.x, r2.y);
                 ctx.lineTo(r1.x, r1.y);
                 ctx.closePath();
+
+                ctx.fillStyle = '#0a0a0c';
                 ctx.fill();
 
                 // Edge lines (Only if NOT minimap)
                 if (!isMiniMap) {
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
                     ctx.beginPath();
                     ctx.moveTo(l1.x, l1.y); ctx.lineTo(l2.x, l2.y);
                     ctx.stroke();
@@ -883,6 +1649,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                     ctx.moveTo(r1.x, r1.y); ctx.lineTo(r2.x, r2.y);
                     ctx.stroke();
                 }
+                ctx.globalAlpha = 1.0; // Reset
             }
         }
 
@@ -896,6 +1663,22 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
             const p2 = racingLine.points[i + 1];
             const idx = racingLine.originalIndices[i];
 
+            let isFaded = false;
+            if (selectedSegIdx !== null) {
+                const curTimes = miniSectorState?.currentLapMiniSectorTimes;
+                const segTime = curTimes?.[selectedSegIdx];
+                if (segTime) {
+                    if (idx < segTime.startIdx || idx > segTime.endIdx) {
+                        isFaded = true;
+                    }
+                }
+            } else if (selectedSectorIdx !== null && sectorBreakpoints && sectorBreakpoints.length >= 2) {
+                const ptSectorIdx = getSectorIdxForPoint(i, racingLine.points.length);
+                if (ptSectorIdx !== selectedSectorIdx) {
+                    isFaded = true;
+                }
+            }
+
             // Safety: Skip extreme teleportation jumps (> 200m)
             const d2 = (p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2;
             if (d2 > (200 / 111320) ** 2) continue;
@@ -908,20 +1691,49 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
             const t = (throttle && Array.isArray(throttle)) ? (throttle[idx] || 0) : 0;
 
             if (isMiniMap) {
-                // Sector-based coloring when reference lap exists
                 let color = 'rgba(150, 150, 150, 0.8)'; // Default gray
-                if (sectorColors && sectorBreakpoints) {
-                    let sectorId = 0;
-                    for (let b = 0; b < sectorBreakpoints.length; b++) {
-                        if (i <= sectorBreakpoints[b].index) {
-                            sectorId = sectorBreakpoints[b].id;
-                            break;
+                if (showMiniSectors) {
+                    const curTimes = miniSectorState?.currentLapMiniSectorTimes;
+                    const refTimes = miniSectorState?.refLapMiniSectorTimes;
+                    const hasReference = referenceLapIdx !== null || referenceLap !== null;
+
+                    if (curTimes && curTimes.length > 0) {
+                        let miniSectorId = -1;
+                        for (let s = 0; s < curTimes.length; s++) {
+                            const seg = curTimes[s];
+                            if (idx >= seg.startIdx && idx <= seg.endIdx) {
+                                miniSectorId = s;
+                                break;
+                            }
                         }
-                        if (b === sectorBreakpoints.length - 1) {
-                            sectorId = sectorBreakpoints[b].id; // Last sector
+
+                        if (miniSectorId !== -1) {
+                            if (hasReference && refTimes && refTimes[miniSectorId]) {
+                                const curDur = curTimes[miniSectorId].duration;
+                                const refDur = refTimes[miniSectorId].duration;
+                                if (curDur > 0 && refDur > 0) {
+                                    if (curDur < refDur - 0.001) color = '#3b82f6';
+                                    else if (curDur > refDur + 0.001) color = '#fbbf24';
+                                    else color = '#ffffff';
+                                }
+                            } else {
+                                const bests = miniSectorState?.sessionMiniSectorBests?.bests;
+                                if (bests && bests[miniSectorId]) {
+                                    const curDur = curTimes[miniSectorId].duration;
+                                    const bestDur = bests[miniSectorId].val;
+                                    if (curDur > 0 && bestDur > 0) {
+                                        if (curDur <= bestDur + 0.001) color = '#ffffff';
+                                        else color = '#fb923c';
+                                    }
+                                }
+                            }
                         }
                     }
-                    color = sectorColors[sectorId] || color;
+                } else {
+                    if (sectorColors && sectorBreakpoints && sectorBreakpoints.length >= 2) {
+                        const sectorIdx = getSectorIdxForPoint(i, racingLine.points.length);
+                        color = sectorColors[sectorIdx] || color;
+                    }
                 }
                 ctx.strokeStyle = color;
             } else {
@@ -937,7 +1749,13 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                 }
             }
 
+            if (isFaded) {
+                ctx.globalAlpha = 0.02;
+            } else {
+                ctx.globalAlpha = 1.0;
+            }
             ctx.stroke();
+            ctx.globalAlpha = 1.0; // Reset
         }
 
         // --- 3. Draw Reference Racing Line (Dashed Golden-Yellow) - ON TOP ---
@@ -949,14 +1767,79 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
             ctx.shadowBlur = 6 / k;
             ctx.shadowColor = '#daa520';
 
-            ctx.beginPath();
+            const hasRealRef = referenceLapIdx !== null || referenceLap !== null;
+
             let first = true;
+            let currentFaded: boolean | null = null;
+
             for (let i = 0; i < trackData.referenceRacingLine.points.length; i++) {
                 const p = trackData.referenceRacingLine.points[i];
-                if (first) { ctx.moveTo(p.x, p.y); first = false; }
-                else { ctx.lineTo(p.x, p.y); }
+                const idx = trackData.referenceRacingLine.originalIndices[i];
+
+                let draw = true;
+                let isFaded = false;
+
+                if (selectedSegIdx !== null) {
+                    if (hasRealRef) {
+                        const refTimes = miniSectorState?.refLapMiniSectorTimes;
+                        const refSegTime = refTimes?.[selectedSegIdx];
+                        if (refSegTime) {
+                            if (idx < refSegTime.startIdx || idx > refSegTime.endIdx) {
+                                isFaded = true;
+                            }
+                        }
+                    } else {
+                        // 隱式比較 (選中區間的最速圈)
+                        const best = miniSectorState?.sessionMiniSectorBests?.bests[selectedSegIdx];
+                        if (best) {
+                            const bestLapTimes = miniSectorState?.allLapsMiniSectorTimes?.[best.lap];
+                            const bestLapSegTime = bestLapTimes?.[selectedSegIdx];
+                            if (bestLapSegTime) {
+                                if (idx < bestLapSegTime.startIdx || idx > bestLapSegTime.endIdx) {
+                                    draw = false;
+                                }
+                            }
+                        }
+                    }
+                } else if (selectedSectorIdx !== null && sectorBreakpoints && sectorBreakpoints.length >= 2) {
+                    const ptSectorIdx = getSectorIdxForPoint(i, trackData.referenceRacingLine.points.length);
+                    if (ptSectorIdx !== selectedSectorIdx) {
+                        isFaded = true;
+                    }
+                }
+
+                if (draw) {
+                    if (currentFaded !== isFaded) {
+                        if (!first) {
+                            ctx.stroke();
+                        }
+                        ctx.beginPath();
+                        ctx.globalAlpha = isFaded ? 0.02 : 1.0;
+                        ctx.moveTo(p.x, p.y);
+                        first = false;
+                        currentFaded = isFaded;
+                    } else {
+                        if (first) {
+                            ctx.beginPath();
+                            ctx.globalAlpha = isFaded ? 0.02 : 1.0;
+                            ctx.moveTo(p.x, p.y);
+                            first = false;
+                            currentFaded = isFaded;
+                        } else {
+                            ctx.lineTo(p.x, p.y);
+                        }
+                    }
+                } else {
+                    if (!first) {
+                        ctx.stroke();
+                        first = true;
+                        currentFaded = null;
+                    }
+                }
             }
-            ctx.stroke();
+            if (!first) {
+                ctx.stroke();
+            }
             ctx.restore();
         }
 
@@ -972,13 +1855,23 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
 
             const degM = 111320;
 
-            const drawBoundary = (pcx: number, pcy: number, dx: number, dy: number, nx: number, ny: number, width: number, label: string) => {
-                const isFinish = label === 'S1';
+            const drawBoundary = (
+                leftPt: { x: number; y: number },
+                rightPt: { x: number; y: number },
+                dx: number,
+                dy: number,
+                nx: number,
+                ny: number,
+                label: string,
+                isFinishOverride?: boolean
+            ) => {
+                const isFinish = isFinishOverride !== undefined ? isFinishOverride : (label === 'S1');
 
-                // Final dimensions: MiniMap uses standard thin lines, MainMap uses premium finish line
-                // Increase length to 18m each side (36m total) for the main map finish line
-                // Minimap: Use a longer 30m line to remain visible at small scale
-                const lineHalfLen = isMiniMap ? (30.0 / degM) : ((isFinish && !isMiniMap) ? (18.0 / degM) : (12.0 / degM));
+                ctx.strokeStyle = isFinish ? '#ffffff' : '#ffff00';
+                ctx.fillStyle = isFinish ? '#ffffff' : '#ffff00';
+
+                // Determine how much to protrude beyond the track edges on both sides
+                const extraLen = isMiniMap ? 25.0 : (isFinish ? 6.0 : 4.0);
 
                 ctx.lineCap = 'butt';
 
@@ -987,19 +1880,26 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                 ctx.lineWidth = isMiniMap ? (2.5 / k) : ((isFinish && !isMiniMap) ? (8.0 / degM) : (4 / k));
                 const forwardShift = (isFinish && !isMiniMap) ? (2 / degM) : 0;
 
+                // Calculate protruding coordinates beyond track boundaries
+                const pLeftX = leftPt.x + nx * (extraLen / degM) + dx * forwardShift;
+                const pLeftY = leftPt.y + ny * (extraLen / degM) + dy * forwardShift;
+                const pRightX = rightPt.x - nx * (extraLen / degM) + dx * forwardShift;
+                const pRightY = rightPt.y - ny * (extraLen / degM) + dy * forwardShift;
+
                 // Draw perpendicular line
                 ctx.beginPath();
-                ctx.moveTo(pcx + nx * lineHalfLen + dx * forwardShift, pcy + ny * lineHalfLen + dy * forwardShift);
-                ctx.lineTo(pcx - nx * lineHalfLen + dx * forwardShift, pcy - ny * lineHalfLen + dy * forwardShift);
+                ctx.moveTo(pLeftX, pLeftY);
+                ctx.lineTo(pRightX, pRightY);
                 ctx.stroke();
 
                 // 2. Labels - Only in main map
                 if (!isMiniMap) {
                     const forwardOffset = 30 / effK;
-                    const sideOffset = lineHalfLen + (12 / effK);
+                    const labelExtra = 12 / effK;
 
-                    const textX = pcx + dx * forwardOffset - nx * sideOffset;
-                    const textY = pcy + dy * forwardOffset - ny * sideOffset;
+                    // Place label slightly further out from the left edge line
+                    const textX = leftPt.x + nx * ((extraLen / degM) + labelExtra) + dx * forwardOffset;
+                    const textY = leftPt.y + ny * ((extraLen / degM) + labelExtra) + dy * forwardOffset;
 
                     ctx.save();
                     // First move to the location in map degrees (within the current k/-k/rotate transform)
@@ -1014,23 +1914,276 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                     ctx.font = `bold 18px Inter, "Segoe UI", sans-serif`;
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
-                    ctx.fillStyle = '#ffff00';
+                    ctx.fillStyle = isFinish ? '#ffffff' : '#ffff00';
                     ctx.fillText(label, 0, 0);
                     ctx.restore();
                 }
             };
 
-            // Draw All Boundaries (Finish Line + Sectors)
-            if (sectorsSource) {
+            const drawSegmentBadge = (leftPt: { x: number; y: number }, nx: number, ny: number, label: string, isLast?: boolean, color?: string, diffText?: string, isSelected?: boolean, isSector: boolean = false) => {
+                if (isMiniMap) return;
+
+                const labelColor = color || '#ffffff';
+                const labelBg = 'rgba(26, 26, 30, 0.95)';
+
+                const baseRadius = isMapMaximized ? 15 : 11;
+                const radius = isSelected ? baseRadius * 1.5 : baseRadius;
+
+                const baseFontSize = isMapMaximized ? 14 : 11;
+                const fontSize = isSelected ? baseFontSize * 1.5 : baseFontSize;
+
+                const offsetInDeg = ((isMapMaximized ? 24 : 18) * (isSelected ? 1.5 : 1)) / effK;
+
+                const bx = leftPt.x + nx * offsetInDeg;
+                const by = leftPt.y + ny * offsetInDeg;
+
+                ctx.save();
+                ctx.translate(bx, by);
+
+                const matrix = ctx.getTransform();
+
+                const targetRef = isSector ? sectorBadgeClickRegionsRef : badgeClickRegionsRef;
+                targetRef.current.push({
+                    index: parseInt(label.replace('S', ''), 10) - 1,
+                    x: matrix.e,
+                    y: matrix.f,
+                    r: radius
+                });
+
+                ctx.setTransform(1, 0, 0, 1, matrix.e, matrix.f);
+
+                const radiusVal = radius;
+
+                ctx.beginPath();
+                ctx.arc(0, 0, radiusVal, 0, 2 * Math.PI);
+                ctx.fillStyle = labelBg;
+                ctx.fill();
+
+                ctx.lineWidth = isSelected ? 2.25 : 1.5;
+                ctx.strokeStyle = labelColor;
+                ctx.shadowBlur = isSelected ? 6 : 4;
+                ctx.shadowColor = labelColor;
+                ctx.stroke();
+
+                ctx.shadowBlur = 0;
+                ctx.font = `bold ${fontSize}px Inter, "Segoe UI", sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = labelColor;
+                ctx.fillText(label, 0, 0);
+
+                if (diffText) {
+                    ctx.font = `bold ${fontSize - 1}px Inter, "Segoe UI", sans-serif`;
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'middle';
+
+                    const textWidth = ctx.measureText(diffText).width;
+                    const capHeight = radiusVal * 1.5;
+                    const capPadding = isSelected ? 16 : 12;
+                    const capWidth = textWidth + capPadding;
+
+                    // Calculate screen-space normal vector to determine which side is away from the track
+                    const screenNx = matrix.a * nx + matrix.c * ny;
+                    const screenNy = matrix.b * nx + matrix.d * ny;
+                    const len = Math.sqrt(screenNx * screenNx + screenNy * screenNy) || 1;
+                    const normalX = screenNx / len;
+
+                    const placeOnRight = normalX >= 0;
+
+                    const capX = placeOnRight
+                        ? radiusVal + (isSelected ? 8 : 6)
+                        : -(radiusVal + (isSelected ? 8 : 6) + capWidth);
+
+                    const capY = -capHeight / 2;
+
+                    ctx.beginPath();
+                    const r = 4;
+                    ctx.moveTo(capX + r, capY);
+                    ctx.lineTo(capX + capWidth - r, capY);
+                    ctx.quadraticCurveTo(capX + capWidth, capY, capX + capWidth, capY + r);
+                    ctx.lineTo(capX + capWidth, capY + capHeight - r);
+                    ctx.quadraticCurveTo(capX + capWidth, capY + capHeight, capX + capWidth - r, capY + capHeight);
+                    ctx.lineTo(capX + r, capY + capHeight);
+                    ctx.quadraticCurveTo(capX, capY + capHeight, capX, capY + capHeight - r);
+                    ctx.lineTo(capX, capY + r);
+                    ctx.quadraticCurveTo(capX, capY, capX + r, capY);
+                    ctx.closePath();
+
+                    ctx.fillStyle = 'rgba(26, 26, 30, 0.95)';
+                    ctx.fill();
+
+                    ctx.lineWidth = isSelected ? 1.5 : 1;
+                    ctx.strokeStyle = labelColor;
+                    ctx.stroke();
+
+                    ctx.fillStyle = labelColor;
+                    ctx.fillText(diffText, capX + (isSelected ? 8 : 6), 0);
+                }
+
+                ctx.restore();
+            };
+
+            // Draw All Boundaries (Finish Line + Sectors or Mini Sectors)
+            if (showMiniSectors) {
+                const referenceTrack = trackData.referenceTrack;
+                const dists = telemetryData ? (telemetryData['Lap Dist'] || telemetryData['Distance']) : null;
+
+                if (miniSectors && miniSectors.length > 0 && dists && referenceTrack.points.length > 0) {
+                    const len = referenceTrack.points.length;
+                    const distStart = dists[referenceTrack.originalIndices[0]] || 0;
+                    const distEnd = dists[referenceTrack.originalIndices[len - 1]] || distStart;
+                    const actualLen = distEnd - distStart;
+
+                    const refLen = miniSectors[miniSectors.length - 1].end;
+                    const stretchRatio = actualLen > 0 ? refLen / actualLen : 1;
+
+                    // 1. Draw segment boundary splitting lines (without text label on line)
+                    miniSectors.forEach((seg: any, idx: number) => {
+                        if (selectedSegIdx !== null) {
+                            const startBoundaryIdx = (selectedSegIdx - 1 + miniSectors.length) % miniSectors.length;
+                            if (idx !== selectedSegIdx && idx !== startBoundaryIdx) return;
+                        }
+
+                        const targetDist = seg.end;
+
+                        let bestI = 0;
+                        let minDist = Infinity;
+
+                        for (let i = 0; i < len; i++) {
+                            const rawDist = dists[referenceTrack.originalIndices[i]];
+                            if (rawDist === undefined) continue;
+                            const curDist = (rawDist - distStart) * stretchRatio;
+                            const d = Math.abs(curDist - targetDist);
+                            if (d < minDist) {
+                                minDist = d;
+                                bestI = i;
+                            }
+                        }
+
+                        const leftPt = referenceTrack.leftEdges[bestI];
+                        const rightPt = referenceTrack.rightEdges[bestI];
+
+                        const sampleRange = 20;
+                        const p1 = referenceTrack.points[Math.max(0, bestI - sampleRange)];
+                        const p2 = referenceTrack.points[Math.min(len - 1, bestI + sampleRange)];
+                        const lineLen = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2) || 1;
+                        const dx = (p2.x - p1.x) / lineLen;
+                        const dy = (p2.y - p1.y) / lineLen;
+                        const nx = -dy, ny = dx;
+
+                        const isFinish = idx === miniSectors.length - 1;
+                        drawBoundary(leftPt, rightPt, dx, dy, nx, ny, "", isFinish);
+                    });
+
+                    // 2. Draw badges at the center of each segment
+                    miniSectors.forEach((seg: any, idx: number) => {
+                        if (selectedSegIdx !== null && selectedSegIdx !== idx) return;
+
+                        const startDist = idx === 0 ? 0 : miniSectors[idx - 1].end;
+                        const endDist = seg.end;
+                        const midDist = (startDist + endDist) / 2;
+
+                        let midI = 0;
+                        let minDist = Infinity;
+                        for (let i = 0; i < len; i++) {
+                            const rawDist = dists[referenceTrack.originalIndices[i]];
+                            if (rawDist === undefined) continue;
+                            const curDist = (rawDist - distStart) * stretchRatio;
+                            const d = Math.abs(curDist - midDist);
+                            if (d < minDist) {
+                                minDist = d;
+                                midI = i;
+                            }
+                        }
+
+                        const isRightSide = seg.badgeSide === 'right';
+                        const edgePt = isRightSide ? referenceTrack.rightEdges[midI] : referenceTrack.leftEdges[midI];
+
+                        const sampleRange = 20;
+                        const p1 = referenceTrack.points[Math.max(0, midI - sampleRange)];
+                        const p2 = referenceTrack.points[Math.min(len - 1, midI + sampleRange)];
+                        const lineLen = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2) || 1;
+                        const dx = (p2.x - p1.x) / lineLen;
+                        const dy = (p2.y - p1.y) / lineLen;
+                        let nx = -dy, ny = dx;
+                        if (isRightSide) {
+                            nx = dy;
+                            ny = -dx;
+                        }
+
+                        const badgeNumber = seg.name.replace(/[^\d]/g, '') || String(idx + 1);
+                        const isLast = idx === miniSectors.length - 1;
+
+                        let badgeColor = '#ffffff';
+                        const hasReference = referenceLapIdx !== null || referenceLap !== null;
+                        if (hasReference && miniSectorState) {
+                            const val = miniSectorState.currentLapMiniSectorTimes?.[idx]?.duration;
+                            const refVal = miniSectorState.refLapMiniSectorTimes?.[idx]?.duration;
+                            if (val !== undefined && val > 0 && refVal !== undefined && refVal > 0) {
+                                const isFaster = val <= refVal;
+                                badgeColor = isFaster ? '#3b82f6' : '#fb923c'; // 快用藍色，慢用橘黃色
+                            }
+                        } else if (!hasReference && miniSectorState) {
+                            const val = miniSectorState.currentLapMiniSectorTimes?.[idx]?.duration;
+                            const bestVal = miniSectorState.sessionMiniSectorBests?.bests[idx]?.val || 0;
+                            if (val !== undefined && val > 0 && bestVal > 0) {
+                                const isBest = val <= bestVal;
+                                if (!isBest) {
+                                    badgeColor = '#fb923c'; // 慢了就用橘黃色
+                                }
+                            }
+                        }
+
+                        // Calculate diff text if this is the selected segment
+                        let diffText: string | undefined = undefined;
+                        const isSelected = selectedSegIdx === idx;
+                        if (isSelected && miniSectorState) {
+                            const val = miniSectorState.currentLapMiniSectorTimes?.[idx]?.duration;
+                            const hasReference = referenceLapIdx !== null || referenceLap !== null;
+                            if (hasReference) {
+                                const refVal = miniSectorState.refLapMiniSectorTimes?.[idx]?.duration;
+                                if (val !== undefined && val > 0 && refVal !== undefined && refVal > 0) {
+                                    const diff = val - refVal;
+                                    diffText = diff >= 0 ? `+${diff.toFixed(3)}` : diff.toFixed(3);
+                                }
+                            } else {
+                                const bestVal = miniSectorState.sessionMiniSectorBests?.bests[idx]?.val || 0;
+                                if (val !== undefined && val > 0 && bestVal > 0) {
+                                    const diff = Math.max(0, val - bestVal);
+                                    diffText = `+${diff.toFixed(3)}`;
+                                }
+                            }
+                        }
+
+                        drawSegmentBadge(edgePt, nx, ny, badgeNumber, isLast, badgeColor, diffText, isSelected);
+                    });
+                }
+            } else if (sectorsSource) {
+                const currentLap = laps.find(l => l.lap === selectedLapIdx);
+                const hasSectors = currentLap?.s1 !== undefined && currentLap?.s2 !== undefined && currentLap?.s3 !== undefined;
+                
+                sectorBadgeClickRegionsRef.current = [];
+
                 sectorsSource.forEach(sector => {
+                    if (selectedSectorIdx !== null) {
+                        if (selectedSectorIdx === 0 && sector.id !== 0 && sector.id !== 1) return;
+                        if (selectedSectorIdx === 1 && sector.id !== 1 && sector.id !== 2) return;
+                        if (selectedSectorIdx === 2 && sector.id !== 2 && sector.id !== 0) return;
+                    }
                     const proj = project(sector.lat, sector.lon);
                     const px = proj.x, py = proj.y;
 
                     let dx = sector.dx, dy = sector.dy;
+                    const n = trackData.referenceTrack.points.length;
+                    let bestIdx = 0, minDist = Infinity;
+                    for (let i = 0; i < n; i++) {
+                        const p = trackData.referenceTrack.points[i];
+                        const d = (p.x - px) ** 2 + (p.y - py) ** 2;
+                        if (d < minDist) { minDist = d; bestIdx = i; }
+                    }
 
                     // Fallback to search if backend didn't provide vectors (backwards compatibility)
                     if (dx === undefined || dy === undefined || sector.id === 0) {
-                        const n = trackData.referenceTrack.points.length;
                         const isFinish = sector.id === 0;
 
                         if (isFinish && n > 5) {
@@ -1040,12 +2193,6 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                             const len = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2) || 1;
                             dx = (p2.x - p1.x) / len; dy = (p2.y - p1.y) / len;
                         } else {
-                            let bestIdx = 0, minDist = Infinity;
-                            for (let i = 0; i < n; i++) {
-                                const p = trackData.referenceTrack.points[i];
-                                const d = (p.x - px) ** 2 + (p.y - py) ** 2;
-                                if (d < minDist) { minDist = d; bestIdx = i; }
-                            }
                             const sampleRange = 20;
                             const p1 = trackData.referenceTrack.points[(bestIdx - sampleRange + n) % n];
                             const p2 = trackData.referenceTrack.points[(bestIdx + sampleRange) % n];
@@ -1055,17 +2202,94 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                     }
                     const nx = -dy, ny = dx;
 
-                    // Use backend lateral offset to find the track center, same as 3D logic
-                    // IMPORTANT: Convert meters to degrees using degM for 2D coordinate space
-                    const pcx = px + nx * ((sector.lateral || 0) / degM);
-                    const pcy = py + ny * ((sector.lateral || 0) / degM);
+                    const leftPt = trackData.referenceTrack.leftEdges[bestIdx];
+                    const rightPt = trackData.referenceTrack.rightEdges[bestIdx];
 
-                    // Sector Color: White for Finish (S1), Yellow for others
-                    ctx.strokeStyle = sector.id === 0 ? '#ffffff' : '#ffff00';
-                    ctx.fillStyle = sector.id === 0 ? '#ffffff' : '#ffff00';
-
-                    drawBoundary(pcx, pcy, dx, dy, nx, ny, sector.width, `S${sector.id + 1}`);
+                    drawBoundary(leftPt, rightPt, dx, dy, nx, ny, `S${sector.id + 1}`);
                 });
+
+                if (hasSectors && sectorBreakpoints && sectorBreakpoints.length >= 2) {
+                    const sortedBreakpoints = [...sectorBreakpoints].sort((a,b) => a.id - b.id);
+                    const bpFinish = sortedBreakpoints.find(b => b.id === 0);
+                    const bpS1 = sortedBreakpoints.find(b => b.id === 1);
+                    const bpS2 = sortedBreakpoints.find(b => b.id === 2);
+
+                    const len = trackData.referenceTrack.points.length;
+                    
+                    const drawSectorBadgeHelper = (startI: number, endI: number, sectorIdx: number, label: string) => {
+                        let midI = Math.floor((startI + endI) / 2);
+                        if (startI > endI) { // wraps around finish line
+                            midI = Math.floor((startI + endI + len) / 2) % len;
+                        }
+                        if (midI >= len) midI = len - 1;
+                        if (midI < 0) midI = 0;
+
+                        const isRightSide = sectorBadgeSides[label as keyof typeof sectorBadgeSides] === 'right';
+                        const edgePt = isRightSide
+                            ? trackData.referenceTrack.rightEdges[midI]
+                            : trackData.referenceTrack.leftEdges[midI];
+
+                        const p1 = trackData.referenceTrack.points[Math.max(0, midI - 10)];
+                        const p2 = trackData.referenceTrack.points[Math.min(len - 1, midI + 10)];
+                        const lineLen = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2) || 1;
+                        const dx = (p2.x - p1.x) / lineLen;
+                        const dy = (p2.y - p1.y) / lineLen;
+                        
+                        let nx = -dy, ny = dx;
+                        if (isRightSide) {
+                            nx = dy;
+                            ny = -dx;
+                        }
+
+                        let badgeColor = '#ffffff';
+                        const isSelected = selectedSectorIdx === sectorIdx;
+                        let diffText: string | undefined = undefined;
+
+                        const hasReference = referenceLapIdx !== null || referenceLap !== null;
+                        const val = sectorIdx === 0 ? currentLap.s1 : sectorIdx === 1 ? currentLap.s2 : currentLap.s3;
+
+                        if (hasReference) {
+                            const refLapData = referenceLap || laps.find(l => l.lap === referenceLapIdx);
+                            const refVal = sectorIdx === 0 ? refLapData?.s1 : sectorIdx === 1 ? refLapData?.s2 : refLapData?.s3;
+                            if (val && refVal) {
+                                if (val <= refVal) badgeColor = '#3b82f6'; // Blue
+                                else badgeColor = '#fb923c'; // Orange
+                                
+                                if (isSelected) {
+                                    const diff = val - refVal;
+                                    diffText = diff >= 0 ? `+${diff.toFixed(3)}` : diff.toFixed(3);
+                                }
+                            }
+                        } else {
+                            const bestVal = sectorIdx === 0 ? sessionBests?.bestS1?.val : sectorIdx === 1 ? sessionBests?.bestS2?.val : sectorIdx === 2 ? sessionBests?.bestS3?.val : undefined;
+                            if (val && bestVal) {
+                                if (val <= bestVal) badgeColor = '#ffffff'; // White
+                                else badgeColor = '#fb923c'; // Orange
+
+                                if (isSelected) {
+                                    const diff = Math.max(0, val - bestVal);
+                                    diffText = `+${diff.toFixed(3)}`;
+                                }
+                            }
+                        }
+
+                        drawSegmentBadge(edgePt, nx, ny, label, false, badgeColor, diffText, isSelected, true);
+                    };
+
+                    const bpStartIdx = bpFinish ? bpFinish.index : 0;
+                    const bpS1Idx = bpS1 ? bpS1.index : Math.floor(len / 3);
+                    const bpS2Idx = bpS2 ? bpS2.index : Math.floor(len * 2 / 3);
+
+                    if (selectedSectorIdx !== null) {
+                        if (selectedSectorIdx === 0) drawSectorBadgeHelper(bpStartIdx, bpS1Idx, 0, 'S1');
+                        else if (selectedSectorIdx === 1) drawSectorBadgeHelper(bpS1Idx, bpS2Idx, 1, 'S2');
+                        else if (selectedSectorIdx === 2) drawSectorBadgeHelper(bpS2Idx, bpFinish ? bpFinish.index : len - 1, 2, 'S3');
+                    } else {
+                        drawSectorBadgeHelper(bpStartIdx, bpS1Idx, 0, 'S1');
+                        drawSectorBadgeHelper(bpS1Idx, bpS2Idx, 1, 'S2');
+                        drawSectorBadgeHelper(bpS2Idx, bpFinish ? bpFinish.index : len - 1, 2, 'S3');
+                    }
+                }
             }
 
             ctx.restore();
@@ -1102,158 +2326,224 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
 
 
         // --- 5. Draw Dynamic Cursors ---
-        const getHeadingAtIdx = (idx: number, sourceData: any) => {
-            const lat = sourceData['GPS Latitude'];
-            const lon = sourceData['GPS Longitude'];
-            if (!lat || !lon) return 0;
-            const window = 15;
-            const i1 = Math.max(0, Math.floor(idx) - window);
-            const i2 = Math.min(lat.length - 1, Math.floor(idx) + window);
-            if (i1 === i2) return 0;
-            const dLat = lat[i2] - lat[i1];
-            const dLon = (lon[i2] - lon[i1]) * trackData.center.lonScale;
-            let heading = Math.atan2(dLon, dLat) * 180 / Math.PI;
 
-            // --- IMPROVEMENT: Low-Speed Stability & Yaw-Based Slip Visualization ---
-            const speed = sourceData['Ground Speed'];
-            const gLat = sourceData['G Force Lat'];
-            if (speed && gLat) {
-                const curSpeedKmh = speed[Math.floor(idx)];
-                const curGLat = gLat[Math.floor(idx)];
+        ctx.restore();
 
-                // 1. Low-Speed Lock: If car is barely moving, don't update heading to avoid GPS noise
-                if (curSpeedKmh < 3.0) {
-                    // Try to find last stable heading (simplified here, just return current)
-                    // In a more robust system we'd store lastHeadingRef
-                } else {
-                    // 2. Yaw-Based Slip Approximation
-                    // Formula: Slip Angle (approx) = Yaw Rate * L / V
-                    // Since we already calculated Yaw Rate = G_Lat / V
-                    // Visual Slip Offset = Constant * (G_Lat / V^2)
-                    const v_mps = curSpeedKmh / 3.6;
-                    const slipOffset = (curGLat * 9.81 / (v_mps * v_mps)) * (180 / Math.PI) * 0.5; // 0.5 is a visual damping factor
-                    heading += Math.max(-15, Math.min(15, slipOffset)); // Cap at 15 degrees for visual sanity
-                }
+    }, [trackData, dimensions, view, telemetryData, flagImage, referenceLapIdx, isMiniMap, cameraMode, followZoom, optimalRotation, forcedRotation, isExpanded, dashboardSyncMode, mapMarkerType, staticTrackBaseData, track3DData, sectorColors, sectorBreakpoints, showMiniSectors, miniSectors, selectedSegIdx, miniSectorState, sectorBadgeSides, laps, selectedStint, getHeadingAtIdx, isAnimating, detectedCorners2D]);
+
+    useEffect(() => {
+        drawTrack();
+    }, [drawTrack]);
+
+    const drawCursors = useCallback(() => {
+        const canvas = cursorCanvasRef.current;
+        if (!canvas || !trackData || isAnimating) return;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const { width, height } = dimensions;
+        if (width === 0 || height === 0) return;
+
+        // A. Calculate Effective View for this frame
+        let effX = view.x;
+        let effY = view.y;
+        let effK = view.k;
+        let effRot = view.rotation;
+
+        const isFollowMode = !isMiniMap && cameraMode !== 'static';
+        const activeCursorIdx = isPlayingRef.current ? (smoothCursorIndexRef.current ?? cursorIndexRef.current) : cursorIndexRef.current;
+
+        if (isFollowMode && activeCursorIdx !== null) {
+            const baseIdx = Math.floor(activeCursorIdx);
+            const lats = telemetryData['GPS Latitude'];
+            const lons = telemetryData['GPS Longitude'];
+
+            if (lats && lons && lats[baseIdx] !== undefined) {
+                const nextIdx = (baseIdx + 1) % lats.length;
+                const frac = activeCursorIdx - baseIdx;
+                const clat = lats[baseIdx] + (lats[nextIdx] - lats[baseIdx]) * frac;
+                const clon = lons[baseIdx] + (lons[nextIdx] - lons[baseIdx]) * frac;
+
+                const worldX = (clon - trackData.center.lon) * trackData.center.lonScale;
+                const worldY = (clat - trackData.center.lat);
+
+                effK = 10000 + followZoom * 5000;
+
+                const heading = getHeadingAtIdx(activeCursorIdx, telemetryData);
+                const targetRot = cameraMode === 'heading-up' ? -heading : (forcedRotation ?? optimalRotation);
+                let diff = (targetRot - smoothRotation.current) % 360;
+                if (diff > 180) diff -= 360;
+                if (diff < -180) diff += 360;
+                smoothRotation.current += diff * 0.15;
+                effRot = smoothRotation.current;
+
+                const rad = effRot * Math.PI / 180;
+                const cos = Math.cos(rad), sin = Math.sin(rad);
+                effX = -effK * (worldX * cos + worldY * sin);
+                effY = -effK * (worldX * sin - worldY * cos);
             }
+        } else if (isMiniMap || !isExpanded) {
+            effRot = optimalRotation;
+        }
 
-            return heading;
+        // B. Begin Cursor Drawing
+        canvas.width = width;
+        canvas.height = height;
+        ctx.clearRect(0, 0, width, height);
+
+        ctx.save();
+        ctx.translate(width / 2 + effX, height / 2 + effY);
+        const activeRotation = (isMiniMap || !isExpanded) ? optimalRotation : effRot;
+        ctx.rotate(activeRotation * Math.PI / 180);
+        ctx.scale(effK, -effK);
+
+        const drawCursorAtIdx = (idx: number, color: string, radius: number, glow: boolean, sourceData: any, isArrow: boolean) => {
+            const baseIdx = Math.floor(idx);
+            const latitudeArray = sourceData['GPS Latitude'];
+            if (!latitudeArray || latitudeArray.length === 0) return;
+            const nextIdx = (baseIdx + 1) % latitudeArray.length;
+            const frac = idx - baseIdx;
+
+            const lat1 = sourceData['GPS Latitude']?.[baseIdx];
+            const lon1 = sourceData['GPS Longitude']?.[baseIdx];
+            const lat2 = sourceData['GPS Latitude']?.[nextIdx];
+            const lon2 = sourceData['GPS Longitude']?.[nextIdx];
+
+            if (lat1 === undefined || lon1 === undefined || lat1 === 0 || lon1 === 0) return;
+
+            const clat = lat1 + (lat2 - lat1) * frac;
+            const clon = lon1 + (lon2 - lon1) * frac;
+
+            const cpx = (clon - trackData.center.lon) * trackData.center.lonScale;
+            const cpy = (clat - trackData.center.lat);
+
+            if (isArrow) {
+                const heading = getHeadingAtIdx(idx, sourceData);
+                ctx.save();
+                ctx.translate(cpx, cpy);
+                ctx.rotate(-heading * Math.PI / 180);
+                ctx.scale(1 / effK, 1 / effK);
+
+                const size = radius * 2.2;
+                ctx.beginPath();
+                ctx.moveTo(0, size);
+                ctx.lineTo(-size * 0.7, -size * 0.8);
+                ctx.lineTo(0, -size * 0.3);
+                ctx.lineTo(size * 0.7, -size * 0.8);
+                ctx.closePath();
+
+                if (glow === false) {
+                    ctx.globalAlpha = 0.85;
+                }
+
+                ctx.fillStyle = color;
+                ctx.fill();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2.5;
+                ctx.stroke();
+                ctx.restore();
+            } else {
+                ctx.save();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = (isMiniMap ? 1 : 2) / effK;
+                ctx.beginPath();
+                ctx.arc(cpx, cpy, (radius + (isMiniMap ? 0.5 : 1)) / effK, 0, Math.PI * 2);
+                ctx.stroke();
+
+                if (glow) {
+                    ctx.shadowColor = color;
+                    ctx.shadowBlur = 20;
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(cpx, cpy, radius / effK, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.shadowBlur = 40;
+                    ctx.globalAlpha = 0.5;
+                    ctx.fill();
+                } else {
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(cpx, cpy, radius / effK, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
         };
 
-        const activeCursorIdx = isPlaying ? (smoothCursorIndex ?? cursorIndex) : cursorIndex;
-
         if (activeCursorIdx !== null && telemetryData) {
-            const drawCursorAtIdx = (idx: number, color: string, radius: number, glow: boolean, sourceData: any, isArrow: boolean) => {
-                const baseIdx = Math.floor(idx);
-                const latitudeArray = sourceData['GPS Latitude'];
-                if (!latitudeArray || latitudeArray.length === 0) return;
-                const nextIdx = (baseIdx + 1) % latitudeArray.length;
-                const frac = idx - baseIdx;
-
-                const lat1 = sourceData['GPS Latitude']?.[baseIdx];
-                const lon1 = sourceData['GPS Longitude']?.[baseIdx];
-                const lat2 = sourceData['GPS Latitude']?.[nextIdx];
-                const lon2 = sourceData['GPS Longitude']?.[nextIdx];
-
-                if (lat1 === undefined || lon1 === undefined || lat1 === 0 || lon1 === 0) return;
-
-                // Interpolate Coordinates
-                const clat = lat1 + (lat2 - lat1) * frac;
-                const clon = lon1 + (lon2 - lon1) * frac;
-
-                // CRITICAL: Always use the MAIN session's projection center to ensure alignment
-                const cpx = (clon - trackData.center.lon) * trackData.center.lonScale;
-                const cpy = (clat - trackData.center.lat);
-
-                if (isArrow) {
-                    const heading = getHeadingAtIdx(idx, sourceData);
-                    ctx.save();
-                    ctx.translate(cpx, cpy);
-                    // Adjust rotation: standard atan2 is CCW from X axis. 
-                    // Our heading is 0=North, 90=East. 
-                    // In flipped canvas (k, -k), rotate is CCW. 
-                    // To make 90=East (Right), we rotate by -heading.
-                    ctx.rotate(-heading * Math.PI / 180);
-                    ctx.scale(1 / k, 1 / k);
-
-                    const size = radius * 2.2;
-                    ctx.beginPath();
-                    ctx.moveTo(0, size); // Tip points North
-                    ctx.lineTo(-size * 0.7, -size * 0.8);
-                    ctx.lineTo(0, -size * 0.3);
-                    ctx.lineTo(size * 0.7, -size * 0.8);
-                    ctx.closePath();
-
-                    // Transparency for overlapping (Reference is drawn last/on-top)
-                    if (isArrow && glow === false) { // Simple heuristic for ghost car call
-                        ctx.globalAlpha = 0.85;
-                    }
-
-                    ctx.fillStyle = color;
-                    ctx.fill();
-                    ctx.strokeStyle = 'white';
-                    ctx.lineWidth = 2.5;
-                    ctx.stroke();
-                    ctx.restore();
-                } else {
-                    ctx.save();
-                    ctx.strokeStyle = 'white';
-                    ctx.lineWidth = (isMiniMap ? 1 : 2) / k;
-                    ctx.beginPath();
-                    ctx.arc(cpx, cpy, (radius + (isMiniMap ? 0.5 : 1)) / k, 0, Math.PI * 2);
-                    ctx.stroke();
-
-                    if (glow) {
-                        ctx.shadowColor = color;
-                        ctx.shadowBlur = 20;
-                        ctx.fillStyle = color;
-                        ctx.beginPath();
-                        ctx.arc(cpx, cpy, radius / k, 0, Math.PI * 2);
-                        ctx.fill();
-                        ctx.shadowBlur = 40;
-                        ctx.globalAlpha = 0.5;
-                        ctx.fill();
-                    } else {
-                        ctx.fillStyle = color;
-                        ctx.beginPath();
-                        ctx.arc(cpx, cpy, radius / k, 0, Math.PI * 2);
-                        ctx.fill();
-                    }
-                    ctx.restore();
-                }
-            };
-
-            // 1. Draw Current Cursor
-            const cursorColor = isMiniMap ? "#3b82f6" : "#3b82f6";
-            const radius = isMiniMap ? 3.5 : 8; // Slightly larger for arrows
-            // Respect user setting for main map, but stick to 'dot' for minimap
+            const cursorColor = "#3b82f6";
+            const radius = isMiniMap ? 3.5 : 8;
             const currentMarkerType = isMiniMap ? 'dot' : mapMarkerType;
             drawCursorAtIdx(activeCursorIdx, cursorColor, radius, !isMiniMap, telemetryData, currentMarkerType === 'arrow');
 
-            // 2. Draw Reference Ghost Car (Using reactive indices from the store)
-            const activeRefIdx = dashboardSyncMode === 'distance' ? referenceDeltaIndex : referenceCursorIndex;
+            const storeState = useTelemetryStore.getState();
+            const activeRefIdx = (dashboardSyncMode === 'distance' && selectedSegIdx === null) ? storeState.referenceDeltaIndex : storeState.referenceCursorIndex;
+            const hasRealRef = referenceLapIdx !== null || referenceLap !== null;
 
-            if (trackData.referenceRacingLine && activeRefIdx !== null) {
+            if (hasRealRef && trackData.referenceRacingLine && activeRefIdx !== null) {
                 const refData = referenceTelemetryData || telemetryData;
-                const refCursorColor = isMiniMap ? "rgba(200, 200, 200, 1.0)" : "#ffc800ff"; // Rich orange
+                const refCursorColor = isMiniMap ? "rgba(200, 200, 200, 1.0)" : "#ffc800ff";
                 const refRadius = isMiniMap ? 3.5 : 6.5;
                 drawCursorAtIdx(activeRefIdx, refCursorColor, refRadius, false, refData, currentMarkerType === 'arrow');
+            } else if (!hasRealRef && selectedSegIdx !== null && miniSectorState?.sessionMiniSectorBests) {
+                const autoCompareIdx = getAutoCompareSyncIdx();
+                if (autoCompareIdx !== null) {
+                    const best = miniSectorState.sessionMiniSectorBests.bests[selectedSegIdx];
+                    if (best) {
+                        const bestLapTimes = miniSectorState.allLapsMiniSectorTimes?.[best.lap];
+                        const bestLapSegTime = bestLapTimes?.[selectedSegIdx];
+                        if (bestLapSegTime && autoCompareIdx >= bestLapSegTime.startIdx && autoCompareIdx <= bestLapSegTime.endIdx) {
+                            const refCursorColor = isMiniMap ? "rgba(200, 200, 200, 1.0)" : "#ffc800ff";
+                            const refRadius = isMiniMap ? 3.5 : 6.5;
+                            drawCursorAtIdx(autoCompareIdx, refCursorColor, refRadius, false, telemetryData, currentMarkerType === 'arrow');
+                        }
+                    }
+                }
             }
         }
 
         ctx.restore();
+    }, [trackData, dimensions, view, telemetryData, referenceLapIdx, referenceLap, referenceTelemetryData, dashboardSyncMode, mapMarkerType, isMiniMap, cameraMode, followZoom, forcedRotation, isExpanded, selectedSegIdx, selectedSectorIdx, sessionBests, laps, selectedLapIdx, miniSectorState, getAutoCompareSyncIdx, getHeadingAtIdx, isAnimating]);
 
-    }, [trackData, dimensions, view, telemetryData, flagImage, cursorIndex, referenceLapIdx, isMiniMap, cameraMode, followZoom, optimalRotation, smoothCursorIndex, carHeading, isPlaying, forcedRotation, isExpanded, referenceCursorIndex, referenceDeltaIndex, dashboardSyncMode, mapMarkerType, staticTrackBaseData, track3DData, sectorColors, sectorBreakpoints, detectedCorners2D]);
-
-    // 4. Cursor rendering in separate effect is no longer needed as we draw it in main loop for synchronization if desired, 
-    // but better to keep it separate for performance if cursorIndex changes fast. 
-    // Actually, drawing it in main loop is easier for Z-order. 
-    // Just keep a minor cleanup effect.
     useEffect(() => {
-        const canvas = cursorCanvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        if (ctx) ctx.clearRect(0, 0, dimensions.width, dimensions.height);
-    }, [dimensions]);
+        drawCursors();
+    }, [drawCursors]);
+
+    useEffect(() => {
+        const unsubscribe = useTelemetryStore.subscribe((state) => {
+            const prevCursor = cursorIndexRef.current;
+            const prevSmooth = smoothCursorIndexRef.current;
+            const prevElapsed = playbackElapsedRef.current;
+            cursorIndexRef.current = state.cursorIndex;
+            smoothCursorIndexRef.current = state.smoothCursorIndex;
+            playbackElapsedRef.current = state.playbackElapsed;
+            isPlayingRef.current = state.isPlaying;
+
+            // Only schedule a rAF draw if cursor or elapsed actually changed
+            const cursorChanged = state.cursorIndex !== prevCursor || state.smoothCursorIndex !== prevSmooth;
+            const elapsedChanged = state.playbackElapsed !== prevElapsed;
+            if (!cursorChanged && !elapsedChanged) return;
+
+            if (cursorRafRef.current) return; // already scheduled this frame
+            cursorRafRef.current = requestAnimationFrame(() => {
+                cursorRafRef.current = 0;
+                const currentCameraMode = useTelemetryStore.getState().cameraMode;
+                const isFollowMode = !isMiniMap && (isMiniMap || !isExpanded ? 'static' : currentCameraMode) !== 'static';
+                if (isFollowMode) {
+                    drawTrack();
+                }
+                drawCursors();
+            });
+        });
+        return () => {
+            unsubscribe();
+            if (cursorRafRef.current) {
+                cancelAnimationFrame(cursorRafRef.current);
+                cursorRafRef.current = 0;
+            }
+        };
+    }, [drawCursors, drawTrack, isMiniMap, isExpanded]);
 
     const handleWheel = (e: React.WheelEvent) => {
         // Allow scroll events on UI panels
@@ -1293,11 +2583,257 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         }));
     };
 
+    const handleSectorNavigation = (idx: number) => {
+        const currentLap = laps.find(l => l.lap === selectedLapIdx);
+        const timeChan = telemetryData?.['Time'] || telemetryData?.['GPS Time'];
+        if (!currentLap || !timeChan || currentLap.s1 === undefined || currentLap.s2 === undefined || currentLap.s3 === undefined) return;
+
+        setIsSegmentLoading(true);
+        if (isPlaying) {
+            togglePlayback();
+        }
+
+        let startIdx = 0;
+        let endIdx = 0;
+        let startElapsed = 0;
+
+        if (sectorBreakpoints && sectorBreakpoints.length >= 2 && racingLineData) {
+            const sortedBreakpoints = [...sectorBreakpoints].sort((a, b) => a.id - b.id);
+            const bpFinish = sortedBreakpoints.find(b => b.id === 0);
+            const bpS1 = sortedBreakpoints.find(b => b.id === 1);
+            const bpS2 = sortedBreakpoints.find(b => b.id === 2);
+
+            const len = racingLineData.points.length;
+            const bpStartIdx = bpFinish ? bpFinish.index : 0;
+            const bpS1Idx = bpS1 ? bpS1.index : Math.floor(len / 3);
+            const bpS2Idx = bpS2 ? bpS2.index : Math.floor(len * 2 / 3);
+
+            let startIdxInRacingLine = 0;
+            let endIdxInRacingLine = 0;
+
+            if (idx === 0) {
+                startIdxInRacingLine = bpStartIdx;
+                endIdxInRacingLine = bpS1Idx;
+            } else if (idx === 1) {
+                startIdxInRacingLine = bpS1Idx;
+                endIdxInRacingLine = bpS2Idx;
+            } else if (idx === 2) {
+                startIdxInRacingLine = bpS2Idx;
+                endIdxInRacingLine = len - 1;
+            }
+
+            startIdx = racingLineData.originalIndices[startIdxInRacingLine];
+            endIdx = racingLineData.originalIndices[endIdxInRacingLine];
+            startElapsed = timeChan[startIdx] - timeChan[racingLineData.originalIndices[bpStartIdx]];
+        } else {
+            let endElapsed = 0;
+            if (idx === 0) {
+                startElapsed = 0;
+                endElapsed = currentLap.s1;
+            } else if (idx === 1) {
+                startElapsed = currentLap.s1;
+                endElapsed = currentLap.s1 + currentLap.s2;
+            } else if (idx === 2) {
+                startElapsed = currentLap.s1 + currentLap.s2;
+                endElapsed = currentLap.duration;
+            }
+
+            const absStart = currentLap.startTime + startElapsed;
+            const absEnd = currentLap.startTime + endElapsed;
+
+            startIdx = findIndexInChannelRange(timeChan, 0, timeChan.length - 1, absStart);
+            endIdx = findIndexInChannelRange(timeChan, 0, timeChan.length - 1, absEnd);
+        }
+
+        setTimeout(() => {
+            setSelectedSectorIdx(idx);
+            setZoomRange([Math.floor(startIdx), Math.floor(endIdx)]);
+            setPlaybackTime(startElapsed);
+            setIsSegmentLoading(false);
+        }, 500);
+    };
+
+    const handleSectorBadgeClick = (clickX: number, clickY: number) => {
+        const region = sectorBadgeClickRegionsRef.current.find(r => {
+            const dx = clickX - r.x;
+            const dy = clickY - r.y;
+            return dx * dx + dy * dy <= r.r * r.r;
+        });
+
+        if (!region) return;
+
+        const idx = region.index;
+        const currentLap = laps.find(l => l.lap === selectedLapIdx);
+        const timeChan = telemetryData?.['Time'] || telemetryData?.['GPS Time'];
+
+        if (selectedSectorIdx === idx) {
+            // Deselecting: pause and reset to start of lap
+            setIsSegmentLoading(true);
+            if (isPlaying) {
+                togglePlayback();
+            }
+            setTimeout(() => {
+                setSelectedSectorIdx(null);
+                setZoomRange(null);
+                setPlaybackTime(0);
+                setIsSegmentLoading(false);
+            }, 500);
+            return;
+        }
+
+        if (!currentLap || !timeChan || currentLap.s1 === undefined || currentLap.s2 === undefined || currentLap.s3 === undefined) return;
+
+        setIsSegmentLoading(true);
+        if (isPlaying) {
+            togglePlayback();
+        }
+
+        let startIdx = 0;
+        let endIdx = 0;
+        let startElapsed = 0;
+
+        if (sectorBreakpoints && sectorBreakpoints.length >= 2 && racingLineData) {
+            const sortedBreakpoints = [...sectorBreakpoints].sort((a, b) => a.id - b.id);
+            const bpFinish = sortedBreakpoints.find(b => b.id === 0);
+            const bpS1 = sortedBreakpoints.find(b => b.id === 1);
+            const bpS2 = sortedBreakpoints.find(b => b.id === 2);
+
+            const len = racingLineData.points.length;
+            const bpStartIdx = bpFinish ? bpFinish.index : 0;
+            const bpS1Idx = bpS1 ? bpS1.index : Math.floor(len / 3);
+            const bpS2Idx = bpS2 ? bpS2.index : Math.floor(len * 2 / 3);
+
+            let startIdxInRacingLine = 0;
+            let endIdxInRacingLine = 0;
+
+            if (idx === 0) {
+                startIdxInRacingLine = bpStartIdx;
+                endIdxInRacingLine = bpS1Idx;
+            } else if (idx === 1) {
+                startIdxInRacingLine = bpS1Idx;
+                endIdxInRacingLine = bpS2Idx;
+            } else if (idx === 2) {
+                startIdxInRacingLine = bpS2Idx;
+                endIdxInRacingLine = len - 1;
+            }
+
+            startIdx = racingLineData.originalIndices[startIdxInRacingLine];
+            endIdx = racingLineData.originalIndices[endIdxInRacingLine];
+            startElapsed = timeChan[startIdx] - timeChan[racingLineData.originalIndices[bpStartIdx]];
+        } else {
+            let endElapsed = 0;
+            if (idx === 0) {
+                startElapsed = 0;
+                endElapsed = currentLap.s1;
+            } else if (idx === 1) {
+                startElapsed = currentLap.s1;
+                endElapsed = currentLap.s1 + currentLap.s2;
+            } else if (idx === 2) {
+                startElapsed = currentLap.s1 + currentLap.s2;
+                endElapsed = currentLap.duration;
+            }
+
+            const absStart = currentLap.startTime + startElapsed;
+            const absEnd = currentLap.startTime + endElapsed;
+
+            startIdx = findIndexInChannelRange(timeChan, 0, timeChan.length - 1, absStart);
+            endIdx = findIndexInChannelRange(timeChan, 0, timeChan.length - 1, absEnd);
+        }
+
+        setTimeout(() => {
+            setSelectedSectorIdx(idx);
+            setZoomRange([Math.floor(startIdx), Math.floor(endIdx)]);
+            setPlaybackTime(startElapsed);
+            setIsSegmentLoading(false);
+        }, 500);
+    };
+
+    const handleBadgeClick = (clickX: number, clickY: number) => {
+        if (!miniSectorState || !miniSectorState.currentLapMiniSectorTimes) return;
+        const region = badgeClickRegionsRef.current.find(r => {
+            const dx = clickX - r.x;
+            const dy = clickY - r.y;
+            return dx * dx + dy * dy <= r.r * r.r;
+        });
+
+        if (!region) return;
+
+        const idx = region.index;
+        const currentLap = laps.find(l => l.lap === selectedLapIdx);
+        const timeChan = telemetryData?.['Time'];
+
+        if (selectedSegIdx === idx) {
+            // Deselecting: pause and reset to start of lap
+            setIsSegmentLoading(true);
+            if (isPlaying) {
+                togglePlayback();
+            }
+            setTimeout(() => {
+                setSelectedSegIdx(null);
+                setZoomRange(null);
+                setPlaybackTime(0);
+                setIsSegmentLoading(false);
+            }, 500);
+            return;
+        }
+
+        const curTimes = miniSectorState.currentLapMiniSectorTimes;
+        const segTime = curTimes[idx];
+        if (!segTime || !currentLap || !timeChan) return;
+
+        setIsSegmentLoading(true);
+        if (isPlaying) {
+            togglePlayback();
+        }
+
+        // Calculate absolute start and offset
+        const absStart = timeChan[segTime.startIdx];
+        const segStartElapsed = absStart !== undefined ? Math.max(0, absStart - currentLap.startTime) : 0;
+
+        setTimeout(() => {
+            setSelectedSegIdx(idx);
+            setZoomRange([segTime.startIdx, segTime.endIdx]);
+            setPlaybackTime(segStartElapsed);
+            setIsSegmentLoading(false);
+        }, 500);
+    };
+
+    const handleSegmentNavigation = (idx: number) => {
+        if (!miniSectorState || !miniSectorState.currentLapMiniSectorTimes) return;
+        const currentLap = laps.find(l => l.lap === selectedLapIdx);
+        const timeChan = telemetryData?.['Time'] || telemetryData['GPS Time'];
+        const curTimes = miniSectorState.currentLapMiniSectorTimes;
+        const segTime = curTimes[idx];
+        if (!segTime || !currentLap || !timeChan) return;
+
+        setIsSegmentLoading(true);
+        if (isPlaying) {
+            togglePlayback();
+        }
+
+        const absStart = timeChan[segTime.startIdx];
+        const segStartElapsed = absStart !== undefined ? Math.max(0, absStart - currentLap.startTime) : 0;
+
+        setTimeout(() => {
+            setSelectedSegIdx(idx);
+            setZoomRange([segTime.startIdx, segTime.endIdx]);
+            setPlaybackTime(segStartElapsed);
+            setIsSegmentLoading(false);
+        }, 500);
+    };
+
     const handleMouseDown = (e: React.MouseEvent) => {
-        if (e.button === 0) { // Left Click -> Rotate
+        if (e.button === 0) { // Left Click -> Rotate/Click
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (rect) {
+                clickStartRef.current = {
+                    x: e.clientX - rect.left,
+                    y: e.clientY - rect.top,
+                    time: Date.now()
+                };
+            }
             if (isMiniMap || !allowRotation) return; // Disable rotation if mini-map or explicitly disallowed
             setIsRotating(true);
-            const rect = containerRef.current?.getBoundingClientRect();
             if (rect) {
                 const centerX = rect.width / 2;
                 const centerY = rect.height / 2;
@@ -1347,12 +2883,69 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
             const dy = e.clientY - lastPos.current.y;
             lastPos.current = { x: e.clientX, y: e.clientY };
             setView(v => ({ ...v, x: v.x + dx, y: v.y + dy }));
+        } else {
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (rect) {
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+                let insideBadge = false;
+                
+                if (showMiniSectors) {
+                    insideBadge = badgeClickRegionsRef.current.some(r => {
+                        const dx = mouseX - r.x;
+                        const dy = mouseY - r.y;
+                        return dx * dx + dy * dy <= r.r * r.r;
+                    });
+                } else {
+                    insideBadge = sectorBadgeClickRegionsRef.current.some(r => {
+                        const dx = mouseX - r.x;
+                        const dy = mouseY - r.y;
+                        return dx * dx + dy * dy <= r.r * r.r;
+                    });
+                }
+
+                const target = e.currentTarget as HTMLElement;
+                if (target) {
+                    if (insideBadge) {
+                        target.style.cursor = 'pointer';
+                    } else {
+                        target.style.cursor = '';
+                    }
+                }
+            }
         }
     };
 
-    const handleMouseUp = () => {
+    const handleMouseUp = (e: React.MouseEvent) => {
         setIsDragging(false);
         setIsRotating(false);
+
+        if (e.button === 0 && clickStartRef.current) {
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (rect) {
+                const clickX = e.clientX - rect.left;
+                const clickY = e.clientY - rect.top;
+                const dx = clickX - clickStartRef.current.x;
+                const dy = clickY - clickStartRef.current.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const dt = Date.now() - clickStartRef.current.time;
+
+                if (dist < 5 && dt < 250) {
+                    if (showMiniSectors) {
+                        handleBadgeClick(clickX, clickY);
+                    } else {
+                        handleSectorBadgeClick(clickX, clickY);
+                    }
+                }
+            }
+        }
+        clickStartRef.current = null;
+    };
+
+    const handleMouseLeave = () => {
+        setIsDragging(false);
+        setIsRotating(false);
+        clickStartRef.current = null;
     };
 
     const handleContextMenu = (e: React.MouseEvent) => {
@@ -1375,18 +2968,80 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         if (!telemetryData || !laps || selectedLapIdx === null) return fallback;
 
         const currentLap = laps.find(l => l.lap === selectedLapIdx);
-        const refMeta = referenceLap || (referenceLapIdx !== null ? laps.find(l => l.lap === referenceLapIdx) : null);
+        if (!currentLap) return fallback;
 
-        const curDur = currentLap?.duration || 0;
-        const hasRefData = referenceTelemetryData || (telemetryData && referenceLapIdx !== null);
-        const refDur = hasRefData && refMeta ? (refMeta.duration || 0) : 0;
-        const maxDur = Math.max(curDur, refDur);
+        // Check if a mini-sector segment is selected
+        let minPlayTime = 0;
+        let maxPlayTime = 0;
+        let isSegmentActive = false;
 
-        if (maxDur === 0) return fallback;
+        if (selectedSegIdx !== null && miniSectorState?.currentLapMiniSectorTimes) {
+            const segTime = miniSectorState.currentLapMiniSectorTimes[selectedSegIdx];
+            const timeChan = telemetryData['Time'] || telemetryData['GPS Time'];
+            if (segTime && timeChan) {
+                const absStart = timeChan[segTime.startIdx];
+                const absEnd = timeChan[segTime.endIdx];
+                if (absStart !== undefined && absEnd !== undefined) {
+                    minPlayTime = Math.max(0, absStart - currentLap.startTime);
+                    maxPlayTime = Math.max(0, absEnd - currentLap.startTime);
+                    isSegmentActive = true;
+                }
+            }
+        } else if (selectedSectorIdx !== null) {
+            const timeChan = telemetryData['Time'] || telemetryData['GPS Time'];
+            const lapChan = telemetryData['Lap'] || telemetryData['lap'];
+            let curLineS = -1;
+            if (lapChan) {
+                for (let i = 0; i < lapChan.length; i++) {
+                    if (lapChan[i] === selectedLapIdx) {
+                        curLineS = i;
+                        break;
+                    }
+                }
+            }
+            if (timeChan && curLineS !== -1) {
+                if (zoomRange) {
+                    const absStart = timeChan[zoomRange[0]];
+                    const absEnd = timeChan[zoomRange[1]];
+                    if (absStart !== undefined && absEnd !== undefined) {
+                        minPlayTime = Math.max(0, absStart - timeChan[curLineS]);
+                        maxPlayTime = Math.max(0, absEnd - timeChan[curLineS]);
+                        isSegmentActive = true;
+                    }
+                } else if (currentLap.s1 !== undefined && currentLap.s2 !== undefined && currentLap.s3 !== undefined) {
+                    if (selectedSectorIdx === 0) {
+                        minPlayTime = 0;
+                        maxPlayTime = currentLap.s1;
+                    } else if (selectedSectorIdx === 1) {
+                        minPlayTime = currentLap.s1;
+                        maxPlayTime = currentLap.s1 + currentLap.s2;
+                    } else if (selectedSectorIdx === 2) {
+                        minPlayTime = currentLap.s1 + currentLap.s2;
+                        maxPlayTime = currentLap.duration;
+                    }
+                    isSegmentActive = true;
+                }
+            }
+        }
 
-        const progress = Math.min(1, Math.max(0, playbackElapsed / maxDur));
-        return { progress, currentTime: formatLapTime(playbackElapsed) };
-    }, [telemetryData, referenceTelemetryData, referenceLap, referenceLapIdx, laps, selectedLapIdx, playbackElapsed]);
+        if (isSegmentActive) {
+            const range = maxPlayTime - minPlayTime;
+            if (range <= 0) return fallback;
+            const progress = Math.min(1, Math.max(0, (playbackElapsed - minPlayTime) / range));
+            return { progress, currentTime: formatLapTime(playbackElapsed) };
+        } else {
+            const refMeta = referenceLap || (referenceLapIdx !== null ? laps.find(l => l.lap === referenceLapIdx) : null);
+            const curDur = currentLap?.duration || 0;
+            const hasRefData = referenceTelemetryData || (telemetryData && referenceLapIdx !== null);
+            const refDur = hasRefData && refMeta ? (refMeta.duration || 0) : 0;
+            const maxDur = Math.max(curDur, refDur);
+
+            if (maxDur === 0) return fallback;
+
+            const progress = Math.min(1, Math.max(0, playbackElapsed / maxDur));
+            return { progress, currentTime: formatLapTime(playbackElapsed) };
+        }
+    }, [telemetryData, referenceTelemetryData, referenceLap, referenceLapIdx, laps, selectedLapIdx, playbackElapsed, selectedSegIdx, selectedSectorIdx, zoomRange, miniSectorState]);
 
     if (!telemetryData) {
         return (
@@ -1398,18 +3053,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
     const editHudMode = useTelemetryStore(state => state.editHudMode);
     const resetHudConfigs = useTelemetryStore(state => state.resetHudConfigs);
 
-    const carStats = useMemo(() => {
-        if (!telemetryData || cursorIndex === null) return { dist: null };
-        const idx = Math.floor(isPlaying ? (smoothCursorIndex ?? cursorIndex) : cursorIndex);
-
-        let dist = null;
-        if (telemetryData['Lap Dist'] && telemetryData['Lap Dist'][idx] !== undefined) {
-            dist = telemetryData['Lap Dist'][idx];
-        } else if (telemetryData['Distance'] && telemetryData['Distance'][idx] !== undefined) {
-            dist = telemetryData['Distance'][idx];
-        }
-        return { dist };
-    }, [telemetryData, cursorIndex, smoothCursorIndex, isPlaying]);
+    // 3. carStats calculations moved to independent subcomponent TopCenterTelemetryHUD
 
     const [showHudMenu, setShowHudMenu] = useState(false);
     const hudMenuRef = useRef<HTMLDivElement>(null);
@@ -1447,7 +3091,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                         initial="hidden"
                         animate="visible"
                         variants={innerContainerVariants}
-                        className={`flex items-center bg-black/60 backdrop-blur-2xl glass-container pointer-events-auto mx-auto border border-white/10 overflow-hidden ${isExpanded ? 'px-6 py-2.5 gap-4 rounded-full' : 'px-3 py-2 gap-2 rounded-[2rem]'}`}
+                        className={`flex items-center bg-black/60 backdrop-blur-2xl glass-container pointer-events-auto mx-auto border border-white/10 ${isExpanded ? 'px-6 py-2.5 gap-4 rounded-full' : 'px-3 py-2 gap-2 rounded-[2rem]'}`}
                         style={{
                             isolation: 'isolate',
                             width: (() => {
@@ -1552,7 +3196,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                                                     </div>
                                                 </div>
                                                 <Tooltip text="RESET VIEW" position="top">
-                                                    <button onClick={fitTrack} className="transition-all rounded-lg glass-container hover:scale-110 active:scale-90 text-slate-500 hover:text-white border border-transparent hover:bg-white/5" onMouseMove={handleGlassMouseMove}><div className="glass-content px-2.5 py-1.5 flex items-center justify-center"><RotateCcw size={16} /></div></button>
+                                                    <button onClick={() => fitTrack(true)} className="transition-all rounded-lg glass-container hover:scale-110 active:scale-90 text-slate-500 hover:text-white border border-transparent hover:bg-white/5" onMouseMove={handleGlassMouseMove}><div className="glass-content px-2.5 py-1.5 flex items-center justify-center"><RotateCcw size={16} /></div></button>
                                                 </Tooltip>
                                                 <div className="glass-container rounded-lg border border-transparent hover:bg-white/5 transition-all">
                                                     <div className="glass-content h-7 px-1 gap-0.5 flex items-center">
@@ -1586,7 +3230,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                                 </>
                             ) : (
                                 <div className="flex items-center gap-2">
-                                    <button onClick={fitTrack} className="text-gray-400 hover:text-white rounded-xl transition-all border border-transparent hover:bg-white/5 active:scale-90 glass-container" onMouseMove={handleGlassMouseMove}><div className="glass-content p-1.5"><RotateCcw size={14} /></div></button>
+                                    <button onClick={() => fitTrack(true)} className="text-gray-400 hover:text-white rounded-xl transition-all border border-transparent hover:bg-white/5 active:scale-90 glass-container" onMouseMove={handleGlassMouseMove}><div className="glass-content p-1.5"><RotateCcw size={14} /></div></button>
                                     <div className="w-px h-3 bg-white/5 mx-0.5" />
                                     {onToggleExpand && (
                                         <button onClick={onToggleExpand} className="text-gray-500 hover:text-white rounded-xl transition-all border border-transparent hover:bg-white/5 active:scale-90 glass-container" onMouseMove={handleGlassMouseMove}><div className="glass-content p-1.5"><Maximize2 size={14} /></div></button>
@@ -1604,35 +3248,81 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
         <div ref={containerRef}
             onMouseMove={handleGlassMouseMove}
             className={`h-full flex flex-col min-h-[inherit] relative group/map transition-all duration-300 ${isMiniMap ? '' : 'glass-container-flat map-bg-unified'} hover:scale-100 overflow-hidden ${isMiniMap ? 'rounded-xl' : (hudMaximized ? 'rounded-none glass-no-blur' : 'rounded-2xl')}`}
-            style={{ 
-                '--glass-hover-scale': '1', 
+            style={{
+                '--glass-hover-scale': '1',
                 '--glass-content-scale': '1'
             } as any}>
             <div className="glass-content flex-1 flex flex-col relative z-10 w-full h-full">
                 {/* Title Overlay */}
                 {!isMiniMap && !isAnimating && (
-                    <h3 className="text-gray-500 text-[12px] font-black uppercase tracking-[0.2em] m-4 absolute top-0 left-0 z-10 pointer-events-auto drop-shadow-md transition-all duration-300 group-hover/map:text-white group-hover/map:drop-shadow-[0_0_10px_rgba(255,255,255,0.8)] cursor-default">Track Map</h3>
+                    <div className="absolute top-4 left-4 z-20 pointer-events-auto flex flex-row items-center gap-3 select-none">
+                        <h3 className="text-gray-500 text-[12px] font-black uppercase tracking-[0.2em] drop-shadow-md transition-all duration-300 group-hover/map:text-white group-hover/map:drop-shadow-[0_0_10px_rgba(255,255,255,0.8)] cursor-default">Track Map</h3>
+                        {(selectedSegIdx !== null || selectedSectorIdx !== null) && (
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setIsSegmentLoading(true);
+                                    if (isPlaying) {
+                                        togglePlayback();
+                                    }
+                                    setTimeout(() => {
+                                        setSelectedSegIdx(null);
+                                        setSelectedSectorIdx(null);
+                                        setZoomRange(null);
+                                        setPlaybackTime(0);
+                                        setIsSegmentLoading(false);
+                                    }, 500);
+                                }}
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-white/10 bg-black/40 hover:bg-black/60 text-blue-400 hover:text-blue-300 transition-all duration-300 backdrop-blur-md cursor-pointer text-[10px] font-black uppercase tracking-wider shadow-[0_4px_12px_rgba(0,0,0,0.3)] hover:scale-105 active:scale-95 group/back-btn"
+                            >
+                                <ArrowLeft size={11} className="transition-transform group-hover/back-btn:-translate-x-0.5" />
+                                Full Track
+                            </button>
+                        )}
+                    </div>
                 )}
 
                 {/* HUD: Top Center Telemetry (Refined Alignment) */}
                 {isExpanded && !isMiniMap && !isAnimating && (
                     <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[100] pointer-events-auto flex flex-col items-center gap-1">
-                        <div className="bg-black/40 backdrop-blur-2xl border border-white/10 rounded-2xl flex items-center shadow-2xl glass-container overflow-hidden"
-                            onMouseMove={handleGlassMouseMove}>
-                            <div className="glass-content px-6 py-2.5 flex items-center">
-                                <div className="flex items-baseline gap-2">
-                                    <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">Dist</span>
-                                    <span className="text-[18px] font-black text-blue-400 tabular-nums tracking-tighter leading-none">
-                                        {carStats.dist !== null ? (carStats.dist / 1000).toFixed(2) : "--.--"}
-                                    </span>
-                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">km</span>
-                                </div>
-                            </div>
+                        <div className="flex flex-row items-center gap-4">
+                            {/* Segment/Sector Navigation Left */}
+                            {((showMiniSectors && selectedSegIdx !== null && selectedSegIdx > 0 && miniSectors.length > 0) || (!showMiniSectors && selectedSectorIdx !== null && selectedSectorIdx > 0)) && (
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (showMiniSectors && selectedSegIdx !== null) handleSegmentNavigation(selectedSegIdx - 1);
+                                        else if (!showMiniSectors && selectedSectorIdx !== null) handleSectorNavigation(selectedSectorIdx - 1);
+                                    }}
+                                    className="w-8 h-8 rounded-full bg-black/50 hover:bg-black/75 border border-white/10 hover:border-white/20 active:scale-95 transition-all text-gray-300 hover:text-white shadow-2xl flex items-center justify-center cursor-pointer hover:scale-110 group/nav-left"
+                                >
+                                    <ChevronLeft size={18} className="transition-transform group-hover/nav-left:-translate-x-0.5" />
+                                </button>
+                            )}
+
+                            <TopCenterTelemetryHUD />
+
+                            {/* Segment/Sector Navigation Right */}
+                            {((showMiniSectors && selectedSegIdx !== null && selectedSegIdx < miniSectors.length - 1 && miniSectors.length > 0) || (!showMiniSectors && selectedSectorIdx !== null && selectedSectorIdx < 2)) && (
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (showMiniSectors && selectedSegIdx !== null) handleSegmentNavigation(selectedSegIdx + 1);
+                                        else if (!showMiniSectors && selectedSectorIdx !== null) handleSectorNavigation(selectedSectorIdx + 1);
+                                    }}
+                                    className="w-8 h-8 rounded-full bg-black/50 hover:bg-black/75 border border-white/10 hover:border-white/20 active:scale-95 transition-all text-gray-300 hover:text-white shadow-2xl flex items-center justify-center cursor-pointer hover:scale-110 group/nav-right"
+                                >
+                                    <ChevronRight size={18} className="transition-transform group-hover/nav-right:translate-x-0.5" />
+                                </button>
+                            )}
                         </div>
 
-                        {/* Maximized Dimension Toggle */}
+                        {/* Maximized Dimension & Sector Toggles */}
                         {isMapMaximized && (
-                            <MaximizedDimensionToggle />
+                            <div className="flex flex-row items-center gap-1.5">
+                                <MaximizedDimensionToggle />
+                                {!show3DLab && <MaximizedSectorToggle />}
+                            </div>
                         )}
                     </div>
                 )}
@@ -1663,7 +3353,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                             aspectRatio: '5/3'
                         }}
                     >
-                        <div className="w-full h-full glass-container rounded-xl overflow-hidden relative transition-all duration-300 pointer-events-auto"
+                        <div className={`w-full h-full glass-container rounded-xl overflow-hidden relative transition-all duration-300 ${showMiniMap ? 'pointer-events-auto' : 'pointer-events-none'}`}
                             onMouseMove={handleGlassMouseMove}
                             style={{ '--glass-hover-scale': '1', '--glass-content-scale': '1' } as any}>
                             <div className="glass-content w-full h-full">
@@ -1680,11 +3370,34 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                     onMouseDown={handleMouseDown}
                     onMouseMove={handleMouseMove}
                     onMouseUp={handleMouseUp}
-                    onMouseLeave={handleMouseUp}
+                    onMouseLeave={handleMouseLeave}
                     onContextMenu={handleContextMenu}
+                    onDoubleClick={() => {
+                        if (isMapMaximized) {
+                            useTelemetryStore.getState().setShowLeftHUDs(!showLeftHUDs);
+                        }
+                    }}
                 >
                     <canvas ref={trackCanvasRef} className="absolute inset-0 block" />
                     <canvas ref={cursorCanvasRef} className="absolute inset-0 block pointer-events-none" />
+                    <AnimatePresence>
+                        {isSegmentLoading && !isMiniMap && (
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="absolute inset-0 z-[250] bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center pointer-events-auto"
+                            >
+                                <div className="flex flex-col items-center gap-3 animate-pulse">
+                                    <div className="w-10 h-10 border-4 border-purple-500/20 border-t-purple-500 rounded-full animate-spin" />
+                                    <div className="text-center">
+                                        <h3 className="text-white text-xs font-black uppercase tracking-[0.2em]">Analyzing Segment Telemetry</h3>
+                                        <p className="text-gray-400 text-[10px] mt-1 font-medium font-mono uppercase tracking-[0.1em]">Comparing Best Mini-Sector Performances</p>
+                                    </div>
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                     {!trackData && (
                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                             <span className="text-gray-600 text-xs">GPS Data Not Available</span>
@@ -1704,7 +3417,6 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                         >
                             <CompactTelemetryOverlay
                                 data={telemetryData}
-                                cursorIndex={smoothCursorIndex}
                                 theme="current"
                                 carModel={sessionMetadata?.modelName}
                                 isMiniMap={isMiniMap}
@@ -1713,7 +3425,6 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                             {(referenceTelemetryData || referenceLapIdx !== null) && (
                                 <CompactTelemetryOverlay
                                     data={referenceTelemetryData || telemetryData}
-                                    cursorIndex={dashboardSyncMode === 'distance' ? referenceDeltaIndex : referenceCursorIndex}
                                     theme="reference"
                                     carModel={referenceSessionMetadata?.modelName || sessionMetadata?.modelName}
                                     isMiniMap={isMiniMap}
@@ -1723,8 +3434,12 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
 
                         {/* 2. Smart Sidebar */}
                         {hudMaximized && (
-                            <div 
-                                className={`absolute top-10 left-4 z-[200] w-[320px] flex flex-col gap-0 isolate ${maximizedSidebarMode === 'data_sources' ? 'bottom-4' : 'pointer-events-none'}`}
+                            <div
+                                className={`absolute top-12 left-4 z-[200] w-[320px] flex flex-col gap-0 isolate transition-all duration-300 ${
+                                    showLeftHUDs
+                                        ? `opacity-100 translate-x-0 ${maximizedSidebarMode === 'data_sources' ? 'bottom-4' : 'pointer-events-none'}`
+                                        : 'opacity-0 -translate-x-4 pointer-events-none'
+                                }`}
                                 onMouseMove={(e) => e.stopPropagation()}
                                 onMouseEnter={(e) => e.stopPropagation()}
                             >
@@ -1738,7 +3453,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                                             transition={{ type: 'spring', stiffness: 120, damping: 20 }}
                                             className="pointer-events-auto flex flex-col gap-2 h-full w-full"
                                         >
-                                            <div 
+                                            <div
                                                 className="flex-1 flex flex-col overflow-hidden rounded-2xl glass-container-static"
                                                 onMouseMove={(e) => {
                                                     e.stopPropagation();
@@ -1876,7 +3591,7 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
                                     }}
                                     exit={{ opacity: 0, x: 40 }}
                                     transition={{ type: 'spring', stiffness: 120, damping: 20 }}
-                                    className="absolute bottom-4 right-[-12px] z-[2000] pointer-events-none flex flex-col justify-end"
+                                    className="absolute bottom-4 right-[-12px] z-[2000] pointer-events-auto flex flex-col justify-end"
                                 >
                                     <DataChartsOverlay />
                                 </motion.div>
@@ -1887,4 +3602,4 @@ export const TrackMap = ({ isExpanded = false, onToggleExpand, isMiniMap = false
             </div>
         </div>
     );
-};
+});

@@ -137,3 +137,4 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+backend/discord_config.json
