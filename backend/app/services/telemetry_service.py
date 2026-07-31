@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import os
 import logging
+from typing import Dict, List, Optional
 from .car_lookup import get_car_info, parse_steer_lock
 
 logger = logging.getLogger(__name__)
@@ -967,15 +968,23 @@ class TelemetryService:
             con.close()
 
     @staticmethod
-    def find_compatible_laps(data_dir: str, track_name: str, track_layout: str, car_class: str):
-        """Find all laps across all sessions matching track, layout and class."""
+    def find_compatible_laps(data_dir: str, track_name: str, track_layout: str, car_class: str,
+                             shared_sessions: Optional[List[Dict]] = None):
+        """Find all laps across all sessions matching track, layout and class.
+
+        `shared_sessions` adds sessions owned by other profiles that were shared
+        on this server, each as {"path", "ownerProfile", "ownerName"}.
+        """
         import glob
         import duckdb
-        
-        files = glob.glob(os.path.join(data_dir, "*.duckdb"))
+
+        candidates = [(f, None, None) for f in glob.glob(os.path.join(data_dir, "*.duckdb"))]
+        for entry in (shared_sessions or []):
+            candidates.append((entry["path"], entry["ownerProfile"], entry.get("ownerName")))
+
         compatible_laps = []
-        
-        for f in files:
+
+        for f, owner_profile, owner_name in candidates:
             session_id = os.path.basename(f)
             try:
                 with duckdb.connect(f, read_only=True) as con:
@@ -1021,7 +1030,10 @@ class TelemetryService:
                                 "rawCarName": meta.get('CarName', ''),
                                 "totalLaps": total_laps,
                                 "stintCount": stint_count,
-                                "fuelUsed": lap.get('fuelUsed', 0.0)
+                                "fuelUsed": lap.get('fuelUsed', 0.0),
+                                "isShared": owner_profile is not None,
+                                "ownerProfile": owner_profile,
+                                "ownerName": owner_name,
                             })
                     else:
                         pass

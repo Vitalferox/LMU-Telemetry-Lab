@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { X, Gauge, Thermometer, Eye, EyeOff, Layout, GripVertical, RotateCcw, Move3d, Save, Compass, Activity, Settings as SettingsIcon, ArrowUpDown, Route } from 'lucide-react';
+import { X, Gauge, Thermometer, Eye, EyeOff, Layout, GripVertical, RotateCcw, Move3d, Save, Compass, Activity, Settings as SettingsIcon, ArrowUpDown, Route, KeyRound } from 'lucide-react';
 import { useTelemetryStore, CATEGORY_CHART_CONFIGS, getCategoryTemplateConfigs } from '../store/telemetryStore';
 import { handleGlassMouseMove } from '../utils/glassEffect';
 import { Tooltip } from './ui/Tooltip';
@@ -125,6 +125,16 @@ export const SettingsOverlay: React.FC = () => {
 
     const [tempRotation, setTempRotation] = useState<string>(userWheelRotation?.toString() ?? '');
     const [isSavingRotation, setIsSavingRotation] = useState(false);
+    const [tokenInput, setTokenInput] = useState<string>(() => localStorage.getItem('auth_token') || '');
+    const [tokenSaved, setTokenSaved] = useState(false);
+
+    const saveToken = () => {
+        const t = tokenInput.trim();
+        if (t) localStorage.setItem('auth_token', t);
+        else localStorage.removeItem('auth_token');
+        setTokenSaved(true);
+        setTimeout(() => setTokenSaved(false), 2000);
+    };
 
     // Sync temp state with store whenever settings are opened
     React.useEffect(() => {
@@ -251,6 +261,33 @@ export const SettingsOverlay: React.FC = () => {
 
                 {/* Scrollable Body */}
                 <div className="glass-content p-10 pt-6 flex-1 overflow-y-auto custom-scrollbar flex flex-col gap-8 relative z-10">
+                    {/* Server access token */}
+                    <div className="flex flex-col gap-4">
+                        <div className="flex items-center gap-2 text-gray-400">
+                            <KeyRound size={16} className="text-purple-400" />
+                            <span className="text-xs font-black uppercase tracking-widest">Server Access Token</span>
+                        </div>
+                        <div className="flex gap-2">
+                            <input
+                                type="password"
+                                value={tokenInput}
+                                onChange={(e) => setTokenInput(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && saveToken()}
+                                placeholder="Paste the token your server admin gave you"
+                                className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-[12px] text-white font-mono focus:outline-none focus:ring-1 focus:ring-purple-500/50"
+                            />
+                            <button
+                                onClick={saveToken}
+                                className="px-5 rounded-xl border border-purple-500/30 bg-purple-500/10 text-purple-300 text-[11px] font-black uppercase tracking-widest hover:bg-purple-500/20 transition-all"
+                            >
+                                {tokenSaved ? 'Saved' : 'Save'}
+                            </button>
+                        </div>
+                        <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">
+                            Only needed when connecting to a hosted server. Leave empty for local use.
+                        </p>
+                    </div>
+
                     {/* Units Section */}
                     <div className="grid grid-cols-2 gap-6">
                         {/* Speed Unit */}

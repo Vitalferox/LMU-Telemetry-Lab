@@ -114,6 +114,21 @@ export const apiClient = {
         return res.json();
     },
 
+    // --- Session sharing ---
+    async getSharedSessions(profileId: string = 'guest'): Promise<{
+        shared: { id: string; ownerProfile: string; ownerName: string; sharedAt: string; isMine: boolean }[]
+    }> {
+        return this._fetchJson(`/sessions/shared?profile_id=${profileId}`);
+    },
+
+    async shareSession(sessionId: string, profileId: string = 'guest'): Promise<void> {
+        return this._fetchJson(`/sessions/${encodeURIComponent(sessionId)}/share?profile_id=${profileId}`, { method: 'POST' });
+    },
+
+    async unshareSession(sessionId: string, profileId: string = 'guest'): Promise<void> {
+        return this._fetchJson(`/sessions/${encodeURIComponent(sessionId)}/share?profile_id=${profileId}`, { method: 'DELETE' });
+    },
+
     async getTelemetry(sessionId: string, stintId?: number, freq: number = 10, onProgress?: (progress: number) => void, profileId: string = 'guest'): Promise<TelemetryData> {
         let url = `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/telemetry?freq=${freq}&profile_id=${profileId}`;
         if (stintId !== undefined) {

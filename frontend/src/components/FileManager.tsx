@@ -5,7 +5,7 @@ import type { Session } from '../types';
 import {
     Database, Search, Upload, Link, Trash2, Settings2, Check, X, Info, Loader2,
     ChevronRight, ChevronDown, MapPin, History as HistoryIcon, Timer, Package, Car, Trophy, LayoutGrid, Clock,
-    FolderSync, Plug, AlertTriangle
+    FolderSync, Plug, AlertTriangle, Share2
 } from 'lucide-react';
 import { handleGlassMouseMove } from '../utils/glassEffect';
 import { Tooltip } from './ui/Tooltip';
@@ -46,6 +46,7 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
     const [importMessage, setImportMessage] = useState<string | null>(null);
     const [damPluginStatus, setDamPluginStatus] = useState<{ installed: boolean; assets_available: boolean; error?: string } | null>(null);
     const [damPluginLoading, setDamPluginLoading] = useState(false);
+    const [sharedIds, setSharedIds] = useState<Set<string>>(new Set());
     const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
     const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
     const [isDeleting, setIsDeleting] = useState(false);
@@ -125,6 +126,29 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
             console.error('DAMPlugin toggle failed:', e);
         } finally {
             setDamPluginLoading(false);
+        }
+    };
+
+    const refreshShared = React.useCallback(async () => {
+        try {
+            const res = await apiClient.getSharedSessions(activeProfileId || 'guest');
+            setSharedIds(new Set(res.shared.filter(s => s.isMine).map(s => s.id)));
+        } catch { setSharedIds(new Set()); }
+    }, [activeProfileId]);
+
+    React.useEffect(() => { refreshShared(); }, [refreshShared]);
+
+    const toggleShare = async (sessionId: string) => {
+        const wasShared = sharedIds.has(sessionId);
+        try {
+            if (wasShared) {
+                await apiClient.unshareSession(sessionId, activeProfileId || 'guest');
+            } else {
+                await apiClient.shareSession(sessionId, activeProfileId || 'guest');
+            }
+            await refreshShared();
+        } catch (e: any) {
+            useTelemetryStore.setState({ error: `Share failed: ${e.message}` });
         }
     };
 
@@ -1007,7 +1031,17 @@ export const FileManager: React.FC<FileManagerProps> = ({ onClose }) => {
                                                         </div>
                                                     </div>
                                                 </div>
-                                                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"><button onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }} className="p-1 text-gray-400 hover:text-red-400 rounded-md"><Trash2 size={12} /></button></div>
+                                                <div className={`flex gap-1 transition-all flex-shrink-0 ${sharedIds.has(s.id) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+                                                    <Tooltip text={sharedIds.has(s.id) ? "Shared — click to stop sharing" : "Share with everyone on this server"} position="left">
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); toggleShare(s.id); }}
+                                                            className={`p-1 rounded-md ${sharedIds.has(s.id) ? 'text-purple-400 hover:text-purple-300' : 'text-gray-400 hover:text-purple-400'}`}
+                                                        >
+                                                            <Share2 size={12} />
+                                                        </button>
+                                                    </Tooltip>
+                                                    <button onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }} className="p-1 text-gray-400 hover:text-red-400 rounded-md"><Trash2 size={12} /></button>
+                                                </div>
                                             </div>
                                         </div>
                                     );

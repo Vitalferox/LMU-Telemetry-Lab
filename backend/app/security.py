@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from contextvars import ContextVar
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
@@ -10,6 +11,15 @@ from starlette.responses import JSONResponse, Response
 from .config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Profile bound to the bearer token of the request being handled, when the
+# token carries one. Read by get_contextual_dirs to pin data access to the
+# authenticated user instead of trusting the client-supplied profile_id.
+_authenticated_profile: ContextVar[str | None] = ContextVar("authenticated_profile", default=None)
+
+
+def get_authenticated_profile() -> str | None:
+    return _authenticated_profile.get()
 
 # ---------------------------------------------------------------------------
 # Path sanitisation
@@ -63,7 +73,11 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             logger.warning("Auth rejected for %s %s from %s", request.method, path, request.client.host if request.client else "?")
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
-        return await call_next(request)
+        reset_token = _authenticated_profile.set(settings.token_to_profile.get(token))
+        try:
+            return await call_next(request)
+        finally:
+            _authenticated_profile.reset(reset_token)
 
 
 # ---------------------------------------------------------------------------

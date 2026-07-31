@@ -9,8 +9,9 @@ import shutil
 from datetime import datetime
 from ..services.telemetry_service import TelemetryService
 from ..services.profiles_service import ProfilesService
+from ..services.sharing_service import SharingService
 from ..services.elevation_service import get_3d_track_data
-from ..security import safe_session_id
+from ..security import safe_session_id, get_authenticated_profile
 from ..config import get_settings
 import duckdb
 import numpy as np
@@ -79,16 +80,12 @@ async def get_3d_track(
     profile_id: Optional[str] = Query("guest")
 ):
     """Get 3D track path (X, Y, Z) for visualization."""
+    db_path, _, _ = resolve_readable_session(session_id, profile_id)
     session_id = safe_session_id(session_id)
-    data_dir, _ = get_contextual_dirs(profile_id)
-    db_path = os.path.join(data_dir, session_id)
 
     logger.info(f"API: GET /track3d - Session: {session_id}, Lap: {lap}, Profile: {profile_id}")
-    
-    if not os.path.exists(db_path):
-        logger.error(f"3D Track DB NOT FOUND: {db_path}")
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-        
+
+
     try:
         # Extract track metadata for scaling and layout-specific mapping
         track_name = None
@@ -198,15 +195,54 @@ LEGACY_DATA_DIR = os.path.join(BASE_DIR, "DuckDB_data")
 ProfilesService.ensure_guest_profile()
 ProfilesService.migrate_legacy_data(LEGACY_DATA_DIR)
 
-def get_contextual_dirs(profile_id: Optional[str] = "guest"):
-    """Get dynamic data and cache dirs based on profile."""
-    p_id = os.path.basename(profile_id or "guest")
+def resolve_profile_id(profile_id: Optional[str] = "guest") -> str:
+    """Profile whose data the request may touch.
+
+    In server mode a token bound to a profile wins over the client-supplied
+    profile_id, so a user cannot read another user's sessions by editing the
+    query string.
+    """
+    bound = get_authenticated_profile()
+    p_id = os.path.basename(bound or profile_id or "guest")
     if not p_id or ".." in p_id:
         raise HTTPException(status_code=400, detail="Invalid profile ID")
+    return p_id
+
+
+def get_contextual_dirs(profile_id: Optional[str] = "guest"):
+    """Get dynamic data and cache dirs based on profile."""
+    p_id = resolve_profile_id(profile_id)
     return (
         ProfilesService.get_profile_data_dir(p_id),
         ProfilesService.get_profile_cache_dir(p_id)
     )
+
+
+def resolve_readable_session(session_id: str, profile_id: Optional[str] = "guest"):
+    """Locate a session the caller is allowed to read.
+
+    Falls back to sessions another profile has shared, so a friend's lap can be
+    used as a reference. Returns (db_path, cache_dir, owner) where owner is None
+    for your own sessions and the owning profile id for a shared one — callers
+    building cache filenames must include it to avoid collisions between
+    identically named sessions belonging to different people.
+    """
+    session_id = safe_session_id(session_id)
+    p_id = resolve_profile_id(profile_id)
+    cache_dir = ProfilesService.get_profile_cache_dir(p_id)
+
+    own_path = os.path.join(ProfilesService.get_profile_data_dir(p_id), session_id)
+    if os.path.exists(own_path):
+        return own_path, cache_dir, None
+
+    owner = SharingService.find_owner(session_id, exclude_profile_id=p_id)
+    if owner:
+        owner = safe_session_id(owner)
+        shared_path = os.path.join(ProfilesService.get_profile_data_dir(owner), session_id)
+        if os.path.exists(shared_path):
+            return shared_path, cache_dir, owner
+
+    raise HTTPException(status_code=404, detail="Session not found")
 
 logger = logging.getLogger(__name__)
 
@@ -226,17 +262,26 @@ async def list_profiles():
         profiles = ProfilesService.list_profiles()
     return {"profiles": profiles}
 
+def _reject_in_server_mode(action: str):
+    """Profiles are provisioned from AUTH_TOKENS when hosted, not from the UI."""
+    if get_settings().is_server:
+        raise HTTPException(status_code=403, detail=f"{action} is disabled in server mode")
+
 @router.post("/profiles")
 async def create_profile(req: ProfileCreate):
+    _reject_in_server_mode("Creating a profile")
     return ProfilesService.create_profile(req.name)
 
 @router.delete("/profiles/{profile_id}")
 async def delete_profile(profile_id: str):
+    _reject_in_server_mode("Deleting a profile")
     ProfilesService.delete_profile(profile_id)
     return {"status": "success"}
 
 @router.put("/profiles/{profile_id}")
 async def update_profile(profile_id: str, req: ProfileUpdate):
+    # Renaming stays available when hosted, but only for your own profile.
+    profile_id = resolve_profile_id(profile_id)
     success = ProfilesService.update_profile(profile_id, req.name)
     if not success:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -506,6 +551,7 @@ async def pick_and_upload(req: OpenPathRequest, profile_id: Optional[str] = Quer
 
 @router.post("/profiles/{profile_id}/avatar")
 async def upload_profile_avatar(profile_id: str, file: UploadFile = File(...)):
+    profile_id = resolve_profile_id(profile_id)
     # Create profile-specific avatar dir
     avatar_dir = os.path.join(ProfilesService.get_app_data_dir(), "Data", profile_id, "avatars")
     os.makedirs(avatar_dir, exist_ok=True)
@@ -1044,7 +1090,12 @@ async def rename_session(session_id: str, request: RenameRequest, profile_id: Op
         
     try:
         os.rename(old_path, new_path)
-        
+
+        # Follow the rename in the sharing registry so it stays shared
+        owner = resolve_profile_id(profile_id)
+        if SharingService.unshare(session_id, owner):
+            SharingService.share(new_name, owner)
+
         # Clear Cache if exists
         if os.path.exists(cache_dir):
             for cache_file in glob.glob(os.path.join(cache_dir, f"{session_id}*.parquet")):
@@ -1081,6 +1132,52 @@ def delete_session(session_id: str, profile_id: Optional[str] = Query("guest")):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Session sharing — make your own sessions readable by everyone on the server
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _require_own_session(session_id: str, profile_id: Optional[str]) -> tuple[str, str]:
+    """Reject sharing a session you don't own."""
+    session_id = safe_session_id(session_id)
+    owner = resolve_profile_id(profile_id)
+    if not os.path.exists(os.path.join(ProfilesService.get_profile_data_dir(owner), session_id)):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session_id, owner
+
+
+@router.post("/sessions/{session_id}/share")
+async def share_session(session_id: str, profile_id: Optional[str] = Query("guest")):
+    session_id, owner = _require_own_session(session_id, profile_id)
+    SharingService.share(session_id, owner)
+    return {"id": session_id, "shared": True}
+
+
+@router.delete("/sessions/{session_id}/share")
+async def unshare_session(session_id: str, profile_id: Optional[str] = Query("guest")):
+    session_id, owner = _require_own_session(session_id, profile_id)
+    SharingService.unshare(session_id, owner)
+    return {"id": session_id, "shared": False}
+
+
+@router.get("/sessions/shared")
+async def list_shared_sessions(profile_id: Optional[str] = Query("guest")):
+    """Sessions shared on this server, with who owns each one."""
+    me = resolve_profile_id(profile_id)
+    names = {p["id"]: p.get("name", p["id"]) for p in ProfilesService.list_profiles()}
+    shared = []
+    for entry in SharingService.list_shared():
+        owner = entry["owner_profile_id"]
+        shared.append({
+            "id": entry["session_id"],
+            "ownerProfile": owner,
+            "ownerName": names.get(owner, owner),
+            "sharedAt": entry.get("shared_at"),
+            "isMine": owner == me,
+        })
+    return {"shared": shared}
+
+
 from fastapi.responses import PlainTextResponse
 from ..services.setup_exporter import generate_svm_from_duckdb
 
@@ -1096,10 +1193,7 @@ async def export_session_setup(session_id: str, request: Request, custom_car_mod
 
     logger.info(f"API: GET /setup/export - Session: {session_id}, custom_car_model: {custom_car_model}, profile_id: {profile_id}")
 
-    data_dir, _ = get_contextual_dirs(profile_id)
-    db_path = os.path.join(data_dir, session_id)
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    db_path, _, _ = resolve_readable_session(session_id, profile_id)
 
     try:
         svm_content = generate_svm_from_duckdb(db_path)
@@ -1145,11 +1239,7 @@ async def export_session_setup(session_id: str, request: Request, custom_car_mod
 @router.get("/sessions/{session_id}/setup")
 async def get_session_setup(session_id: str, profile_id: Optional[str] = Query("guest")):
     """Get structured car setup data from a session's DuckDB metadata."""
-    session_id = safe_session_id(session_id)
-    data_dir, _ = get_contextual_dirs(profile_id)
-    db_path = os.path.join(data_dir, session_id)
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    db_path, _, _ = resolve_readable_session(session_id, profile_id)
 
     try:
         import json
@@ -1305,14 +1395,10 @@ async def get_session_setup(session_id: str, profile_id: Optional[str] = Query("
 @router.get("/sessions/{session_id}/laps")
 async def get_session_laps(session_id: str, profile_id: Optional[str] = Query("guest")):
     """Get summary of laps for a session with robust logging."""
-    session_id = safe_session_id(session_id)
-    data_dir, _ = get_contextual_dirs(profile_id)
     logger.info(f"API: GET /laps - Profile: {profile_id}, Session: {session_id}")
-    db_path = os.path.join(data_dir, session_id)
-    if not os.path.exists(db_path):
-        logger.error(f"Database NOT FOUND: {db_path}")
-        raise HTTPException(status_code=404, detail=f"Database not found: {session_id}")
-        
+    db_path, _, _ = resolve_readable_session(session_id, profile_id)
+
+
     try:
         data = TelemetryService.get_laps_header(db_path)
         logger.info(f"API: Successfully retrieved {len(data.get('laps', []))} laps for {session_id}")
@@ -1328,10 +1414,26 @@ async def get_reference_laps(
     car_class: str = Query(...),
     profile_id: Optional[str] = Query("guest")
 ):
-    """Find compatible laps for reference across all profile sessions."""
-    data_dir, _ = get_contextual_dirs(profile_id)
+    """Find compatible laps for reference: own sessions plus those shared by others."""
+    me = resolve_profile_id(profile_id)
+    data_dir = ProfilesService.get_profile_data_dir(me)
+
+    names = {p["id"]: p.get("name", p["id"]) for p in ProfilesService.list_profiles()}
+    shared_sessions = []
+    for entry in SharingService.list_shared():
+        owner = entry["owner_profile_id"]
+        if owner == me:
+            continue   # already covered by the scan of the caller's own directory
+        shared_sessions.append({
+            "path": os.path.join(ProfilesService.get_profile_data_dir(owner), entry["session_id"]),
+            "ownerProfile": owner,
+            "ownerName": names.get(owner, owner),
+        })
+
     try:
-        laps = TelemetryService.find_compatible_laps(data_dir, track_name, track_layout, car_class)
+        laps = TelemetryService.find_compatible_laps(
+            data_dir, track_name, track_layout, car_class, shared_sessions=shared_sessions
+        )
         return {"laps": laps}
     except Exception as e:
         logger.error(f"Error finding compatible laps: {e}", exc_info=True)
@@ -1348,13 +1450,9 @@ async def get_telemetry(
 ):
     """Get fused telemetry data with robust logging."""
     session_id = safe_session_id(session_id)
-    data_dir, cache_dir = get_contextual_dirs(profile_id)
     logger.info(f"API: GET /telemetry - Profile: {profile_id}, Session: {session_id}, Freq: {freq}, Stint: {stint_id}")
-    db_path = os.path.join(data_dir, session_id)
-    if not os.path.exists(db_path):
-        logger.error(f"Database NOT FOUND: {db_path}")
-        raise HTTPException(status_code=404, detail="Session not found")
-        
+    db_path, cache_dir, owner = resolve_readable_session(session_id, profile_id)
+
     try:
         # Ensure cache dir exists
         if not os.path.exists(cache_dir):
@@ -1362,7 +1460,8 @@ async def get_telemetry(
 
         stint_suffix = f"_stint{stint_id}" if stint_id is not None else ""
         lap_suffix = f"_lap{lap_id}" if lap_id is not None else ""
-        parquet_path = os.path.join(cache_dir, f"{session_id}_{freq}Hz{stint_suffix}{lap_suffix}_elev_v12.parquet")
+        owner_prefix = f"shared_{owner}_" if owner else ""
+        parquet_path = os.path.join(cache_dir, f"{owner_prefix}{session_id}_{freq}Hz{stint_suffix}{lap_suffix}_elev_v12.parquet")
         
         if os.path.exists(parquet_path):
              import pandas as pd
@@ -1502,11 +1601,9 @@ async def export_session_lap(session_id: str, lap_number: int, request: Request,
         custom_car_model = q_custom
 
     logger.info(f"API: GET /export/lap - Session: {session_id}, Lap: {lap_number}, custom_car_model: {custom_car_model}, profile_id: {profile_id}")
-    data_dir, cache_dir = get_contextual_dirs(profile_id)
-    db_path = os.path.join(data_dir, session_id)
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail="Session not found")
-        
+    db_path, cache_dir, _ = resolve_readable_session(session_id, profile_id)
+
+
     try:
         # 1. Fetch metadata for naming
         from ..services.car_lookup import get_car_info
@@ -1615,10 +1712,8 @@ async def ai_coach_analyze_lap(
     profile_id: Optional[str] = Query("guest"),
 ):
     session_id = safe_session_id(session_id)
-    data_dir, _ = get_contextual_dirs(profile_id)
-    db_path = os.path.join(data_dir, session_id)
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail="Session not found")
+    data_dir, _ = get_contextual_dirs(profile_id)   # engineer memory stays the reader's own
+    db_path, _, _ = resolve_readable_session(session_id, profile_id)
 
     service = _get_coach_service()
     result = service.analyze_lap(
@@ -1639,10 +1734,8 @@ async def ai_coach_analyze_session(
     profile_id: Optional[str] = Query("guest"),
 ):
     session_id = safe_session_id(session_id)
-    data_dir, _ = get_contextual_dirs(profile_id)
-    db_path = os.path.join(data_dir, session_id)
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail="Session not found")
+    data_dir, _ = get_contextual_dirs(profile_id)   # engineer memory stays the reader's own
+    db_path, _, _ = resolve_readable_session(session_id, profile_id)
 
     service = _get_coach_service()
     result = service.analyze_session(
@@ -1662,10 +1755,8 @@ async def ai_coach_setup_advice(
     profile_id: Optional[str] = Query("guest"),
 ):
     session_id = safe_session_id(session_id)
-    data_dir, _ = get_contextual_dirs(profile_id)
-    db_path = os.path.join(data_dir, session_id)
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail="Session not found")
+    data_dir, _ = get_contextual_dirs(profile_id)   # engineer memory stays the reader's own
+    db_path, _, _ = resolve_readable_session(session_id, profile_id)
 
     # Optionally fetch setup data
     setup_data = None

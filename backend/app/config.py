@@ -28,7 +28,9 @@ class Settings(BaseSettings):
     APP_MODE: str = "local"
 
     # --- Auth ---
-    # Comma-separated bearer tokens. Each user gets their own.
+    # Comma-separated bearer tokens, each optionally bound to a profile:
+    #   "thierry:tok_abc,paul:tok_def"  → token identifies both the user and their profile
+    #   "tok_abc"                       → unbound token (no profile lock)
     # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
     AUTH_TOKENS: str = ""
 
@@ -48,11 +50,28 @@ class Settings(BaseSettings):
     def is_server(self) -> bool:
         return self.APP_MODE.lower() == "server"
 
+    def _parsed_tokens(self) -> list[tuple[str | None, str]]:
+        """Split AUTH_TOKENS into (profile_id | None, token) pairs."""
+        pairs: list[tuple[str | None, str]] = []
+        for entry in self.AUTH_TOKENS.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            profile, sep, token = entry.partition(":")
+            if sep and profile.strip() and token.strip():
+                pairs.append((profile.strip(), token.strip()))
+            else:
+                pairs.append((None, entry))
+        return pairs
+
     @property
     def auth_token_set(self) -> set[str]:
-        if not self.AUTH_TOKENS:
-            return set()
-        return {t.strip() for t in self.AUTH_TOKENS.split(",") if t.strip()}
+        return {token for _, token in self._parsed_tokens()}
+
+    @property
+    def token_to_profile(self) -> dict[str, str]:
+        """Tokens bound to a profile. Unbound tokens are absent from this map."""
+        return {token: profile for profile, token in self._parsed_tokens() if profile}
 
     @property
     def cors_origin_list(self) -> list[str]:

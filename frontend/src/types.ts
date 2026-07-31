@@ -105,6 +105,9 @@ export interface ReferenceLap {
     stintCount?: number;
     totalLaps?: number;
     fuelUsed?: number;
+    isShared?: boolean;
+    ownerProfile?: string | null;
+    ownerName?: string | null;
 }
 
 // ---- AI Coach / Race Engineer ----

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useTelemetryStore, findMappedCarModel } from '../store/telemetryStore';
 import { apiClient } from '../api/client';
 import type { ReferenceLap } from '../types';
-import { Search, History, MapPin, X, Loader2, Calendar, ChevronRight, ChevronDown } from 'lucide-react';
+import { Search, History, MapPin, X, Loader2, Calendar, ChevronRight, ChevronDown, Share2 } from 'lucide-react';
 import { handleGlassMouseMove } from '../utils/glassEffect';
 import { Tooltip } from './ui/Tooltip';
 import { getBrandLogoPath } from '../utils/carHelpers';
@@ -66,8 +66,10 @@ export const ReferenceLapBrowser: React.FC<ReferenceLapBrowserProps> = ({ onClos
             carModel?: string;
             stintCount?: number;
             totalLaps?: number;
+            isShared?: boolean;
+            ownerName?: string | null;
             fastestValidDuration: number;
-            stints: Record<number, ReferenceLap[]> 
+            stints: Record<number, ReferenceLap[]>
         }> = {};
 
         filtered.forEach(lap => {
@@ -80,6 +82,8 @@ export const ReferenceLapBrowser: React.FC<ReferenceLapBrowserProps> = ({ onClos
                     carModel: lap.carModel,
                     stintCount: lap.stintCount,
                     totalLaps: lap.totalLaps,
+                    isShared: lap.isShared,
+                    ownerName: lap.ownerName,
                     fastestValidDuration: Infinity,
                     stints: {}
                 };
@@ -181,6 +185,12 @@ export const ReferenceLapBrowser: React.FC<ReferenceLapBrowserProps> = ({ onClos
                                                     <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest">{formatDate(session.date)}</span>
                                                 </div>
                                                 <div className="flex items-center gap-2">
+                                                    {session.isShared && (
+                                                        <span className="flex items-center gap-1 text-[9px] font-black py-0.5 px-2 bg-purple-500/10 rounded border border-purple-500/30 text-purple-300 uppercase tracking-tighter">
+                                                            <Share2 size={9} />
+                                                            {session.ownerName || 'shared'}
+                                                        </span>
+                                                    )}
                                                     <span className="text-[9px] font-black py-0.5 px-2 bg-white/5 rounded border border-white/10 text-gray-400 uppercase tracking-tighter italic">{session.driver}</span>
                                                     {isExpanded ? <ChevronDown size={14} className="text-blue-400" /> : <ChevronRight size={14} className="text-gray-600" />}
                                                 </div>
