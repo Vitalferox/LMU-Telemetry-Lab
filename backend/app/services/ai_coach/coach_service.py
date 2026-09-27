@@ -11,11 +11,17 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Pricing per 1M tokens (USD) — Sonnet 4.6
+# Pricing per 1M tokens (USD). Cache writes cost 1.25x input for the 5-minute TTL
+# and 2x for the 1-hour TTL; cache reads are listed per model.
 _PRICING = {
-    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+    "claude-opus-5-5": {"input": 4.0, "output": 20.0, "cache_read": 0.20},
+    "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.50},
+    "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20},
+    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30},
+    "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_read": 0.10},
 }
-_DEFAULT_PRICING = {"input": 3.0, "output": 15.0}
+_DEFAULT_PRICING = _PRICING["claude-opus-5-5"]
+_CACHE_WRITE_MULT = {"5m": 1.25, "1h": 2.0}
 _USD_TO_EUR = 0.92
 
 
@@ -28,6 +34,7 @@ class AnalysisResult:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_eur: float = 0.0
+    model: str = ""
     error: Optional[str] = None
 
     def to_dict(self) -> dict:
@@ -38,6 +45,7 @@ class AnalysisResult:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "cost_eur": round(self.cost_eur, 4),
+            "model": self.model,
             "error": self.error,
         }
 
@@ -56,6 +64,8 @@ class CoachService:
         self._api_key = settings.ANTHROPIC_API_KEY
         self._model = settings.ANTHROPIC_MODEL
         self._max_tokens = settings.ANTHROPIC_MAX_TOKENS
+        self._effort = settings.ANTHROPIC_EFFORT
+        self._cache_ttl = settings.ANTHROPIC_CACHE_TTL if settings.ANTHROPIC_CACHE_TTL in _CACHE_WRITE_MULT else "1h"
         self._client = None
         self._kb_text = _load_knowledge_base()
 
@@ -71,13 +81,23 @@ class CoachService:
         from .engineer_memory import EngineerMemory
         return EngineerMemory(data_dir)
 
-    def _compute_cost(self, tokens_in: int, tokens_out: int) -> float:
+    def _compute_cost(self, usage) -> float:
+        """Real cost of a call, including knowledge-base cache writes and reads."""
         prices = _PRICING.get(self._model, _DEFAULT_PRICING)
-        cost_usd = (tokens_in * prices["input"] + tokens_out * prices["output"]) / 1_000_000
+        cache_write = usage.cache_creation_input_tokens or 0
+        cache_read = usage.cache_read_input_tokens or 0
+        cost_usd = (
+            usage.input_tokens * prices["input"]
+            + cache_write * prices["input"] * _CACHE_WRITE_MULT[self._cache_ttl]
+            + cache_read * prices["cache_read"]
+            + usage.output_tokens * prices["output"]
+        ) / 1_000_000
         return cost_usd * _USD_TO_EUR
 
     def _call_claude(self, system_prompt: str, user_message: str) -> AnalysisResult:
         """Make a single Claude API call with prompt caching on the knowledge base."""
+        from .prompts import RESPONSE_JSON_SCHEMA
+
         client = self._get_client()
 
         system_blocks = []
@@ -85,9 +105,16 @@ class CoachService:
             system_blocks.append({
                 "type": "text",
                 "text": self._kb_text,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": {"type": "ephemeral", "ttl": self._cache_ttl},
             })
         system_blocks.append({"type": "text", "text": system_prompt})
+
+        # The schema guarantees parseable JSON; adaptive thinking + effort set how hard it reasons
+        output_config: dict = {"format": {"type": "json_schema", "schema": RESPONSE_JSON_SCHEMA}}
+        extra: dict = {}
+        if not self._model.startswith("claude-haiku"):  # Haiku has no adaptive thinking / effort
+            output_config["effort"] = self._effort
+            extra["thinking"] = {"type": "adaptive"}
 
         try:
             response = client.messages.create(
@@ -95,14 +122,29 @@ class CoachService:
                 max_tokens=self._max_tokens,
                 system=system_blocks,
                 messages=[{"role": "user", "content": user_message}],
+                output_config=output_config,
+                **extra,
             )
         except Exception as e:
             logger.error(f"Claude API call failed: {e}")
             return AnalysisResult(error=str(e))
 
-        tokens_in = response.usage.input_tokens
-        tokens_out = response.usage.output_tokens
-        cost = self._compute_cost(tokens_in, tokens_out)
+        usage = response.usage
+        tokens_in = (usage.input_tokens + (usage.cache_creation_input_tokens or 0)
+                     + (usage.cache_read_input_tokens or 0))
+        tokens_out = usage.output_tokens
+        cost = self._compute_cost(usage)
+        logger.info(
+            f"Coach call {self._model}: in={usage.input_tokens} cache_write={usage.cache_creation_input_tokens} "
+            f"cache_read={usage.cache_read_input_tokens} out={tokens_out} cost={cost:.4f} EUR "
+            f"stop={response.stop_reason}"
+        )
+        if response.stop_reason == "refusal":
+            return AnalysisResult(error="Le modèle a refusé cette analyse.", tokens_in=tokens_in,
+                                  tokens_out=tokens_out, cost_eur=cost, model=self._model)
+        if response.stop_reason == "max_tokens":
+            return AnalysisResult(error="Réponse tronquée : augmente ANTHROPIC_MAX_TOKENS dans le .env.",
+                                  tokens_in=tokens_in, tokens_out=tokens_out, cost_eur=cost, model=self._model)
 
         raw_text = "".join(
             b.text for b in response.content if getattr(b, "type", None) == "text"
@@ -126,7 +168,7 @@ class CoachService:
                 memory_updates=parsed.get("memory_updates", []),
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
-                cost_eur=cost,
+                cost_eur=cost, model=self._model,
             )
         except json.JSONDecodeError:
             logger.warning("Failed to parse Claude response as JSON, returning raw text")
@@ -135,7 +177,7 @@ class CoachService:
                 sections=[{"title": "Analyse", "content": raw_text, "severity": "info"}],
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
-                cost_eur=cost,
+                cost_eur=cost, model=self._model,
             )
 
     def analyze_lap(

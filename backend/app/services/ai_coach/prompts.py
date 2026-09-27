@@ -99,3 +99,52 @@ severity meanings: "success" = good performance, "info" = neutral observation, "
 memory_updates: include 0-3 observations worth remembering for future analyses of this driver/car/circuit.
 Keep observations factual and reusable (e.g. "Thierry brakes 5m too late at Spa Bus Stop with the 499P").
 """
+
+# Enforced by the API (output_config.format) so the answer always parses — mirrors the
+# structure described above.
+RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["info", "warning", "success"]},
+                },
+                "required": ["title", "content", "severity"],
+                "additionalProperties": False,
+            },
+        },
+        "recommendations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "priority": {"type": "string", "enum": ["P1", "P2", "P3"]},
+                    "action": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["priority", "action", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "memory_updates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "enum": ["driving", "setup", "strategy"]},
+                    "observation": {"type": "string"},
+                },
+                "required": ["category", "observation"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["summary", "sections", "recommendations", "memory_updates"],
+    "additionalProperties": False,
+}

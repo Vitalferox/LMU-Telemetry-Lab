@@ -40,8 +40,10 @@ class Settings(BaseSettings):
 
     # --- AI Coach ---
     ANTHROPIC_API_KEY: str = ""
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-6-20250514"
-    ANTHROPIC_MAX_TOKENS: int = 4096
+    ANTHROPIC_MODEL: str = "claude-opus-5-5"
+    ANTHROPIC_MAX_TOKENS: int = 16000       # includes the model's thinking
+    ANTHROPIC_EFFORT: str = "medium"        # low | medium | high | xhigh | max
+    ANTHROPIC_CACHE_TTL: str = "1h"         # knowledge-base cache: "1h" or "5m"
 
     # --- Debug ---
     DEBUG: bool = False

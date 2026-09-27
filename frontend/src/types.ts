@@ -131,6 +131,7 @@ export interface AnalysisResult {
     tokens_in: number;
     tokens_out: number;
     cost_eur: number;
+    model?: string;
     error?: string | null;
 }
 

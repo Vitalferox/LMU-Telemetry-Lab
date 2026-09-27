@@ -81,7 +81,7 @@ const ResultView: React.FC<{ result: AnalysisResult }> = ({ result }) => (
 
         {/* Cost footer */}
         <div className="flex items-center justify-end gap-4 text-[11px] text-gray-500 px-1">
-            <span>Sonnet 4.6</span>
+            {result.model && <span>{result.model}</span>}
             <span>{result.tokens_in.toLocaleString()} in / {result.tokens_out.toLocaleString()} out</span>
             <span>~{result.cost_eur.toFixed(3)} EUR</span>
         </div>
