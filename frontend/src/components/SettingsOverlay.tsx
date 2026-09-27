@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { X, Gauge, Thermometer, Eye, EyeOff, Layout, GripVertical, RotateCcw, Move3d, Save, Compass, Activity, Settings as SettingsIcon, ArrowUpDown, Route, CheckSquare, Check, ChevronDown, Search, Filter, KeyRound } from 'lucide-react';
-import { useTelemetryStore, CATEGORY_CHART_CONFIGS, getCategoryTemplateConfigs, getAllMasterChartConfigs } from '../store/telemetryStore';
+import { useTelemetryStore, CATEGORY_CHART_CONFIGS, getCategoryTemplateConfigs, buildCustomChartConfigs } from '../store/telemetryStore';
 import { handleGlassMouseMove } from '../utils/glassEffect';
 import { Tooltip } from './ui/Tooltip';
 import packageJson from '../../package.json';
@@ -161,17 +161,7 @@ export const SettingsOverlay: React.FC = () => {
     // Filter and Sort charts based on CATEGORY_CHART_CONFIGS or Master List
     const displayCharts = useMemo(() => {
         if (chartLayoutMode === 'custom') {
-            const master = getAllMasterChartConfigs(useTelemetryStore.getState());
-            const custom = JSON.parse(localStorage.getItem('custom_chart_settings') || '{}');
-            return master.map((c, i) => {
-                const key = `${c.id}-${c.wheelIndex ?? 'all'}`;
-                return {
-                    ...c,
-                    ...custom[key],
-                    order: custom[key]?.order !== undefined ? custom[key].order : c.order ?? i,
-                    visible: custom[key]?.visible !== undefined ? custom[key].visible : c.visible
-                };
-            }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+            return buildCustomChartConfigs(useTelemetryStore.getState());
         }
 
         const templateConfigs = getCategoryTemplateConfigs(activeSettingsCategory as any, {

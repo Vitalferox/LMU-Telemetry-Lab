@@ -106,7 +106,7 @@ else:
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "antigravity-backend", "version": "1.5.1"}
+    return {"status": "ok", "service": "antigravity-backend", "version": "1.5.2"}
 
 # Force reload touch tag
 if __name__ == "__main__":

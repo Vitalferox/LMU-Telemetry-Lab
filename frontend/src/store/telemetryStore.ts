@@ -745,6 +745,26 @@ export const getAllMasterChartConfigs = (state: TelemetryState): ChartConfig[] =
     return list;
 };
 
+const chartKey = (c: { id: string; wheelIndex?: number }) => `${c.id}-${c.wheelIndex ?? 'all'}`;
+const DEFAULT_CHART_KEYS = new Set(DEFAULT_CHARTS.map(chartKey));
+
+/**
+ * Master chart list for the custom layout. Only the core driver charts are visible
+ * by default: category templates mark their charts visible, so without this every
+ * never-toggled advanced channel would show up on each app restart.
+ */
+export const getCustomMasterChartConfigs = (state: TelemetryState): ChartConfig[] =>
+    getAllMasterChartConfigs(state).map(c => ({ ...c, visible: DEFAULT_CHART_KEYS.has(chartKey(c)) }));
+
+/** Custom layout: master list + the user's saved overrides (custom_chart_settings), sorted. */
+export const buildCustomChartConfigs = (state: TelemetryState): ChartConfig[] => {
+    let custom: Record<string, Partial<ChartConfig>> = {};
+    try { custom = JSON.parse(localStorage.getItem('custom_chart_settings') || '{}'); } catch { /* corrupted → defaults */ }
+    return getCustomMasterChartConfigs(state)
+        .map((c, i) => ({ ...c, order: c.order ?? i, ...custom[chartKey(c)] }))
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+};
+
 export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     sessions: [],
     currentSessionId: null,
@@ -795,35 +815,17 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         const savedMode = localStorage.getItem('chart_layout_mode');
         if (savedMode !== 'custom') return DEFAULT_CHARTS;
 
-        // Reconstruct master list using the same view-mode settings from localStorage
-        // (mirrors getAllMasterChartConfigs but without a full state object)
-        const fakeState = {
-            suspensionViewMode: (localStorage.getItem('suspension_view_mode') as 'raw' | 'relative') || 'raw',
+        // Same view-mode defaults as the store fields below, so the rebuilt list
+        // matches what refreshCustomChartConfigs() produces later.
+        return buildCustomChartConfigs({
+            suspensionViewMode: (localStorage.getItem('suspension_view_mode') as 'split' | 'merged') || 'split',
             thirdDeflectionViewMode: (localStorage.getItem('third_deflection_view_mode') as 'split' | 'merged') || 'split',
             handlingViewMode: (localStorage.getItem('handling_view_mode') as 'split' | 'merged') || 'split',
-            tyresPressureViewMode: (localStorage.getItem('tyres_pressure_view_mode') as 'split' | 'merged') || 'split',
-            rideHeightViewMode: (localStorage.getItem('ride_height_view_mode') as 'split' | 'merged') || 'split',
-        } as any;
-
-        const list: ChartConfig[] = [];
-        const seen = new Set<string>();
-        const addConfig = (c: ChartConfig) => {
-            const key = `${c.id}-${c.wheelIndex ?? 'all'}`;
-            if (!seen.has(key)) { seen.add(key); list.push(c); }
-        };
-
-        (Object.keys(CATEGORY_CHART_CONFIGS) as ChartCategory[]).forEach(cat => {
-            const templateConfigs = getCategoryTemplateConfigs(cat, fakeState);
-            templateConfigs.forEach(addConfig);
-        });
-        addConfig({ id: 'Pitch', alias: 'Pitch Angle (Calc)', color: '#a855f7', visible: true, order: 6.5, height: 120, unit: 'deg' });
-        addConfig({ id: 'Roll', alias: 'Roll Angle (Calc)', color: '#ec4899', visible: true, order: 6.6, height: 120, unit: 'deg' });
-
-        const custom = (() => { try { return JSON.parse(localStorage.getItem('custom_chart_settings') || '{}'); } catch { return {}; } })();
-        return list.map((c, i) => {
-            const key = `${c.id}-${c.wheelIndex ?? 'all'}`;
-            return custom[key] ? { ...c, ...custom[key] } : { ...c, order: c.order ?? i };
-        }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+            tyresPressureViewMode: (localStorage.getItem('tyres_pressure_view_mode') as 'split' | 'merged') || 'merged',
+            rideHeightViewMode: (localStorage.getItem('ride_height_view_mode') as 'split' | 'merged') || 'merged',
+            slipRatioViewMode: (localStorage.getItem('slip_ratio_view_mode') as 'split' | 'merged') || 'merged',
+            pedalsViewMode: (localStorage.getItem('pedals_view_mode') as 'split' | 'merged') || 'split',
+        } as TelemetryState);
     })(),
     chartPresets: [
         ...BUILT_IN_PRESETS,
@@ -911,18 +913,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         }
     },
     refreshCustomChartConfigs: () => {
-        const state = get();
-        const master = getAllMasterChartConfigs(state);
-        const custom = JSON.parse(localStorage.getItem('custom_chart_settings') || '{}');
-        const merged = master.map((c, i) => {
-            const key = `${c.id}-${c.wheelIndex ?? 'all'}`;
-            if (custom[key]) {
-                return { ...c, ...custom[key] };
-            }
-            return { ...c, order: c.order ?? i };
-        }).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-
-        set({ chartConfigs: merged });
+        set({ chartConfigs: buildCustomChartConfigs(get()) });
     },
 
     setShowCarSelection: (val) => set({ showCarSelection: val }),
