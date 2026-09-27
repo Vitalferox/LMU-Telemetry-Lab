@@ -10,6 +10,7 @@ from datetime import datetime
 from ..services.telemetry_service import TelemetryService
 from ..services.profiles_service import ProfilesService
 from ..services.sharing_service import SharingService
+from ..services.discord_service import DiscordService
 from ..services.elevation_service import get_3d_track_data
 from ..security import safe_session_id, get_authenticated_profile
 from ..config import get_settings
@@ -231,6 +232,9 @@ def resolve_readable_session(session_id: str, profile_id: Optional[str] = "guest
     p_id = resolve_profile_id(profile_id)
     cache_dir = ProfilesService.get_profile_cache_dir(p_id)
 
+    if session_id.startswith("discord__"):
+        return _resolve_discord_session(session_id), cache_dir, "discord"
+
     own_path = os.path.join(ProfilesService.get_profile_data_dir(p_id), session_id)
     if os.path.exists(own_path):
         return own_path, cache_dir, None
@@ -244,6 +248,24 @@ def resolve_readable_session(session_id: str, profile_id: Optional[str] = "guest
 
     raise HTTPException(status_code=404, detail="Session not found")
 
+
+def _resolve_discord_session(session_id: str) -> str:
+    """Download a session shared on the Discord forum into a temp cache (once)."""
+    thread_id = session_id.split("__", 1)[1]
+    if not thread_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid Discord session id")
+
+    cache_dir = os.path.join(APP_DATA_ROOT, "cache", "discord_temp")
+    os.makedirs(cache_dir, exist_ok=True)
+    temp_path = os.path.join(cache_dir, f"{thread_id}.duckdb")
+    if not os.path.exists(temp_path):
+        logger.info(f"Downloading Discord session database for thread {thread_id}...")
+        atts = DiscordService.get_thread_attachments(thread_id)
+        if not atts or not atts.get("telemetry"):
+            raise HTTPException(status_code=404, detail="Discord telemetry attachment not found.")
+        DiscordService.download_discord_file(atts["telemetry"]["url"], temp_path)
+    return temp_path
+
 logger = logging.getLogger(__name__)
 
 # --- Profile Endpoints ---
@@ -253,6 +275,9 @@ class ProfileCreate(BaseModel):
 
 class ProfileUpdate(BaseModel):
     name: str
+
+class ProfileReorder(BaseModel):
+    profile_ids: List[str]
 
 @router.get("/profiles")
 async def list_profiles():
@@ -271,6 +296,12 @@ def _reject_in_server_mode(action: str):
 async def create_profile(req: ProfileCreate):
     _reject_in_server_mode("Creating a profile")
     return ProfilesService.create_profile(req.name)
+
+@router.post("/profiles/reorder")
+async def reorder_profiles(req: ProfileReorder):
+    _reject_in_server_mode("Reordering profiles")
+    profiles = ProfilesService.reorder_profiles(req.profile_ids)
+    return {"profiles": profiles}
 
 @router.delete("/profiles/{profile_id}")
 async def delete_profile(profile_id: str):
@@ -1938,9 +1969,15 @@ async def discord_share_session_lap(session_id: str, request: DiscordShareReques
         user_id = member_data.get("user_id")
         driver_mention = f"<@{user_id}>"
         
+        # Only append layout name if it is different from track_name and not empty
+        if layout_name and layout_name != track_name:
+            track_display = f"{track_name} ({layout_name})"
+        else:
+            track_display = track_name
+            
         header_block = (
             f"### Telemetry Shared by {driver_mention}\n\n"
-            f"* **Track:** {track_name} ({layout_name})\n"
+            f"* **Track:** {track_display}\n"
             f"* **Car:** {friendly_car}\n"
             f"* **Lap Time:** {lap_time_str}\n\n"
             f"---\n\n"
@@ -1971,6 +2008,55 @@ async def discord_share_session_lap(session_id: str, request: DiscordShareReques
     except Exception as e:
         logger.error(f"Discord sharing failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+class DiscordDownloadRequest(BaseModel):
+    profile_id: Optional[str] = "guest"
+    telemetry_url: str
+    telemetry_filename: str
+    setup_url: Optional[str] = None
+    setup_filename: Optional[str] = None
+
+@router.get("/discord/shares")
+async def list_discord_shares(car_class: str):
+    """Retrieve shared laps list for a specific car class from Discord Forum."""
+    shares = DiscordService.list_shared_laps(car_class)
+    return {"shares": shares}
+
+@router.post("/discord/shares/download")
+async def download_discord_share(request: DiscordDownloadRequest):
+    """Download telemetry and optional setup from Discord and place in user profile data folder."""
+    data_dir, cache_dir = get_contextual_dirs(request.profile_id)
+    
+    # 1. Validate filenames to prevent directory traversal
+    telemetry_filename = os.path.basename(request.telemetry_filename)
+    if not telemetry_filename.endswith(".duckdb"):
+        raise HTTPException(status_code=400, detail="Invalid telemetry file type. Must end in .duckdb")
+        
+    telemetry_path = os.path.join(data_dir, telemetry_filename)
+    
+    # 2. Download telemetry
+    try:
+        DiscordService.download_discord_file(request.telemetry_url, telemetry_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download telemetry file: {str(e)}")
+        
+    # 3. Download setup if present
+    setup_downloaded = False
+    if request.setup_url and request.setup_filename:
+        setup_filename = os.path.basename(request.setup_filename)
+        if setup_filename.endswith(".svm"):
+            setup_path = os.path.join(data_dir, setup_filename)
+            try:
+                DiscordService.download_discord_file(request.setup_url, setup_path)
+                setup_downloaded = True
+            except Exception as e:
+                logger.error(f"Failed to download setup file: {e}")
+                
+    return {
+        "success": True,
+        "telemetry_path": telemetry_path,
+        "setup_downloaded": setup_downloaded
+    }
 
 @router.get("/debug/env")
 async def debug_env():
