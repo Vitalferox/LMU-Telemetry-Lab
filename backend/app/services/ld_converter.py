@@ -824,6 +824,201 @@ def merge_extra_channels(native_db_path: str, ld_db_path: str, source_name: str 
         con_l.close()
 
 
+# ── .ldx sidecar (lap summary + setup, written by the game next to each .ld) ──
+
+def parse_ldx(ldx_path: str) -> dict:
+    """
+    Parse the MoTeC .ldx sidecar the game writes next to each native .ld.
+    Returns {"total_laps": int, "fastest_time": str, "setup": {name: "value unit"}}.
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.parse(ldx_path).getroot()
+    out = {"total_laps": 0, "fastest_time": "", "setup": {}}
+    for el in root.iter():
+        ident, value = el.get("Id"), el.get("Value")
+        if ident is None or value is None:
+            continue
+        if ident == "Total Laps":
+            try:
+                out["total_laps"] = int(value)
+            except ValueError:
+                pass
+        elif ident == "Fastest Time":
+            out["fastest_time"] = value
+        elif ident.startswith("_Setup_"):
+            unit = el.get("Unit") or ""
+            out["setup"][ident[len("_Setup_"):]] = f"{value} {unit}".strip() if value else ""
+    return out
+
+
+# .ldx setup name → key of the game's native CarSetup JSON (see GET /sessions/{id}/setup)
+_LDX_TO_VM = {
+    "FW": "VM_FRONT_WING", "RW": "VM_REAR_WING",
+    "WaterRadiator": "VM_WATER_RADIATOR", "OilRadiator": "VM_OIL_RADIATOR",
+    "BrakeDuct": "VM_BRAKE_DUCTS", "BrakeDuctRear": "VM_BRAKE_DUCTS_REAR",
+    "FrontWheelTrack": "VM_FRONT_WHEEL_TRACK", "RearWheelTrack": "VM_REAR_WHEEL_TRACK",
+    "FrontAntiSway": "VM_FRONT_ANTISWAY", "RearAntiSway": "VM_REAR_ANTISWAY",
+    "FrontToeIn": "VM_FRONT_TOEIN", "RearToeIn": "VM_REAR_TOEIN",
+    "LeftCaster": "VM_LEFT_CASTER", "RightCaster": "VM_RIGHT_CASTER",
+    "Front3rdPacker": "VM_FRONT_3RD_PACKERS", "Front3rdSpring": "VM_FRONT_3RD_SPRING",
+    "Front3rdTenderSpring": "VM_FRONT_3RD_TENDERSPRING",
+    "Front3rdSlowBump": "VM_FRONT_3RD_SLOWBUMP", "Front3rdFastBump": "VM_FRONT_3RD_FASTBUMP",
+    "Front3rdSlowRebound": "VM_FRONT_3RD_SLOWREBOUND", "Front3rdFastRebound": "VM_FRONT_3RD_FASTREBOUND",
+    "Rear3rdPacker": "VM_REAR_3RD_PACKERS", "Rear3rdSpring": "VM_REAR_3RD_SPRING",
+    "Rear3rdTenderSpring": "VM_REAR_3RD_TENDERSPRING",
+    "Rear3rdSlowBump": "VM_REAR_3RD_SLOWBUMP", "Rear3rdFastBump": "VM_REAR_3RD_FASTBUMP",
+    "Rear3rdSlowRebound": "VM_REAR_3RD_SLOWREBOUND", "Rear3rdFastRebound": "VM_REAR_3RD_FASTREBOUND",
+    **{f"ChassisAdj{i:02d}": f"VM_CHASSIS_ADJ_{i:02d}" for i in range(12)},
+    "SteerLock": "VM_STEER_LOCK", "RearBrake": "VM_BRAKE_BALANCE",
+    "BrakeMigration": "VM_BRAKE_MIGRATION", "BrakePressure": "VM_BRAKE_PRESSURE",
+    "TractionControlMap": "VM_TRACTIONCONTROLMAP", "TCPowerCutMap": "VM_TRACTIONCONTROLPOWERCUTMAP",
+    "TCSlipAngleMap": "VM_TRACTIONCONTROLSLIPANGLEMAP", "AntilockBrakeSystemMap": "VM_ANTILOCKBRAKESYSTEMMAP",
+    "RevLimit": "VM_REV_LIMITER", "RegenerationMap": "VM_REGEN_LEVEL",
+    "ElectricMotorMap": "VM_ELECTRIC_MOTOR_MAP", "EngineMixture": "VM_ENGINE_MIXTURE",
+    "RatioSet": "VM_RATIO_SET", "DiffPower": "VM_DIFF_POWER", "DiffCoast": "VM_DIFF_COAST",
+    "DiffPreload": "VM_DIFF_PRELOAD", "FrontDiffPower": "VM_FRONT_DIFF_POWER",
+    "FrontDiffCoast": "VM_FRONT_DIFF_COAST", "FrontDiffPreload": "VM_FRONT_DIFF_PRELOAD",
+    "RearSplit": "VM_TORQUE_SPLIT",
+}
+_LDX_WHEEL_TO_WM = {
+    "Camber": "CAMBER", "Pressure": "PRESSURE", "Packer": "PACKERS", "Spring": "SPRING",
+    "TenderSpring": "TENDERSPRING", "SpringRubber": "SRUBBER", "RideHeight": "RIDEHEIGHT",
+    "SlowBump": "SLOWBUMP", "FastBump": "FASTBUMP", "SlowRebound": "SLOWREBOUND",
+    "FastRebound": "FASTREBOUND", "BrakeDisc": "BRAKEDISC", "BrakePad": "BRAKEPAD",
+    "Compound": "COMPOUND",
+}
+
+
+def ldx_setup_to_carsetup(setup: dict) -> dict:
+    """Convert an .ldx setup dict to the game's native CarSetup JSON shape."""
+    out = {}
+    for name, value in setup.items():
+        key = _LDX_TO_VM.get(name)
+        if key is None and len(name) > 2 and name[:2] in ("FL", "FR", "RL", "RR"):
+            wm = _LDX_WHEEL_TO_WM.get(name[2:])
+            key = f"WM_{wm}-W_{name[:2]}" if wm else None
+        if key is None:
+            continue
+        available = value not in ("", "N/A")
+        out[key] = {"available": available, "stringValue": value}
+    return out
+
+
+# ── Stitch per-pit-exit .ld recordings into one session ───────────────────────
+
+def session_clock_range(db_path: str) -> tuple[float, float]:
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        lo, hi = con.execute('SELECT min(value), max(value) FROM "GPS Time"').fetchone()
+        return float(lo), float(hi)
+    finally:
+        con.close()
+
+
+def left_pits(db_path: str) -> bool:
+    """False when the recording never left the pits (garage-only file)."""
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        tables = {t[0] for t in con.execute("SHOW TABLES").fetchall()}
+        if "In Pits" not in tables:
+            return True
+        return bool(con.execute('SELECT count(*) FROM "In Pits" WHERE value < 0.5').fetchone()[0])
+    finally:
+        con.close()
+
+
+def concat_sessions(parts: list[str], output_path: str, source_files: list[str],
+                    stint_setups: list[dict] | None = None) -> dict:
+    """
+    Concatenate converted recordings of the same game session (the game writes one
+    .ld per pit exit, all on the same session-elapsed clock) into one .duckdb.
+
+    Continuous tables are stored on each part's own GPS Time grid, so they are
+    concatenated row-wise together with GPS Time; event tables (with ts) are
+    unioned. The gap between two parts (car in the garage) is left as a gap.
+    At each part boundary an "In Pits" = 1 event is added at the end of the
+    previous part so the lap containing the return to the garage counts as an
+    in-lap, making the next one an out-lap.
+    """
+    parts = sorted(parts, key=lambda p: session_clock_range(p)[0])
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    out = duckdb.connect(output_path)
+    try:
+        # Table layout from the part with the most tables
+        layouts: dict[str, list[tuple[str, str]]] = {}
+        for p in parts:
+            con = duckdb.connect(p, read_only=True)
+            try:
+                for (t,) in con.execute("SHOW TABLES").fetchall():
+                    if t not in layouts:
+                        layouts[t] = [(c[0], c[1]) for c in con.execute(f'DESCRIBE "{t}"').fetchall()]
+            finally:
+                con.close()
+
+        gps_lens = []
+        for idx, p in enumerate(parts):
+            out.execute(f"ATTACH '{p.replace(chr(39), chr(39) * 2)}' AS src (READ_ONLY)")
+            try:
+                src_tables = {t[0] for t in out.execute(
+                    "SELECT table_name FROM information_schema.tables WHERE table_catalog = 'src'").fetchall()}
+                n_gps = out.execute('SELECT count(*) FROM src."GPS Time"').fetchone()[0]
+                gps_lens.append(n_gps)
+                for t, cols in layouts.items():
+                    if t in ("metadata", "channelsList", "eventsList"):
+                        if idx == 0 and t in src_tables:
+                            out.execute(f'CREATE TABLE "{t}" AS SELECT * FROM src."{t}"')
+                        continue
+                    col_list = ", ".join(f'"{c}"' for c, _ in cols)
+                    is_event = "ts" in (c for c, _ in cols)
+                    if idx == 0:
+                        decl = ", ".join(f'"{c}" {typ}' for c, typ in cols)
+                        out.execute(f'CREATE TABLE "{t}" ({decl})')
+                    if t not in src_tables:
+                        if not is_event:
+                            # Channel absent from this part: keep rows aligned with GPS Time
+                            nulls = ", ".join("NULL" for _ in cols)
+                            out.execute(f'INSERT INTO "{t}" SELECT {nulls} FROM range({n_gps})')
+                        continue
+                    n = out.execute(f'SELECT count(*) FROM src."{t}"').fetchone()[0]
+                    if is_event or n == n_gps:
+                        out.execute(f'INSERT INTO "{t}" ({col_list}) SELECT {col_list} FROM src."{t}" ORDER BY rowid')
+                    else:
+                        # Other rate than GPS Time: resample by index onto this part's grid
+                        df = out.execute(f'SELECT {col_list} FROM src."{t}" ORDER BY rowid').df()
+                        x_src = np.linspace(0.0, 1.0, max(n, 1))
+                        x_dst = np.linspace(0.0, 1.0, n_gps)
+                        res = pd.DataFrame({c: (np.interp(x_dst, x_src, df[c].values.astype(np.float64))
+                                                if n else np.full(n_gps, np.nan)) for c, _ in cols})
+                        out.register("df_resampled", res)
+                        out.execute(f'INSERT INTO "{t}" ({col_list}) SELECT {col_list} FROM df_resampled')
+                        out.unregister("df_resampled")
+            finally:
+                out.execute("DETACH src")
+
+        # In-lap markers: back in the garage at the end of every part but the last
+        ends = [session_clock_range(p)[1] for p in parts[:-1]]
+        if ends and "In Pits" in layouts:
+            out.executemany('INSERT INTO "In Pits" (ts, value) VALUES (?, 1)', [[e] for e in ends])
+
+        # Metadata: recording time of the first part, plus provenance and setups
+        import json
+        meta = {"SourceFiles": json.dumps(source_files)}
+        if stint_setups:
+            meta["StintSetups"] = json.dumps(stint_setups)
+            last = next((s["setup"] for s in reversed(stint_setups) if s.get("setup")), None)
+            if last:
+                meta["CarSetup"] = json.dumps(ldx_setup_to_carsetup(last))
+        out.execute("DELETE FROM metadata WHERE key IN (SELECT unnest(?))", [list(meta)])
+        out.executemany("INSERT INTO metadata VALUES (?, ?)", list(meta.items()))
+        out.execute("CHECKPOINT")
+        log.info("Stitched %d recordings into %s", len(parts), os.path.basename(output_path))
+        return {"parts": len(parts), "rows": int(sum(gps_lens))}
+    finally:
+        out.close()
+
+
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

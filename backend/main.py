@@ -14,11 +14,17 @@ def get_log_file():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend_debug.log")
 
 log_file = get_log_file()
+# Windows consoles default to cp1252: never let a non-ASCII log message (→, é…) raise
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file),
+        logging.FileHandler(log_file, encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -129,6 +135,7 @@ if __name__ == "__main__":
             "file": {
                 "class": "logging.FileHandler",
                 "filename": log_file,
+                "encoding": "utf-8",
                 "formatter": "default",
             },
             "console": {

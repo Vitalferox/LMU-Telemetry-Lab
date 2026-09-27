@@ -801,6 +801,157 @@ def _clear_session_cache(cache_dir: str, session_id: str):
                 logger.warning(f"Failed to delete cache file {cache_file}: {e}")
 
 
+def _stitch_native_ld_sessions(candidates: list, data_dir: str, cache_dir: str,
+                               existing_db: set, imported: list, skipped: list, errors: list):
+    """
+    Since mid-2026 the game writes one native .ld (+ .ldx) per pit exit instead of
+    one .duckdb per session. All recordings of a game session share the session
+    clock, so consecutive files whose clock offsets match their wall-clock offsets
+    are stitched into ONE session. Garage-only recordings are dropped.
+
+    Incremental: a stitched session records its sources in metadata (SourceFiles);
+    new recordings that continue it are appended on the next sync.
+    """
+    import json as _json
+    from ..services.ld_converter import (
+        convert_ld_to_duckdb, concat_sessions, session_clock_range, left_pits, parse_ldx,
+    )
+
+    # Existing stitched sessions: which sources they cover, and where they end
+    covered: set = set()
+    segments = []   # dicts: kind, track, letter, dt, clock, ...
+    for f in os.listdir(data_dir):
+        if not f.lower().endswith(".duckdb") or f.startswith("_tmp"):
+            continue
+        p = os.path.join(data_dir, f)
+        try:
+            with duckdb.connect(p, read_only=True) as con:
+                meta = dict(con.execute(
+                    "SELECT key, value FROM metadata WHERE key IN ('SourceFiles', 'StintSetups')").fetchall())
+        except Exception:
+            continue
+        if "SourceFiles" not in meta:
+            continue
+        sources = _json.loads(meta["SourceFiles"])
+        covered.update(sources)
+        parsed = _parse_native_session_name(f)
+        if parsed:
+            segments.append({
+                "kind": "db", "track": parsed[0].lower(), "letter": parsed[1], "dt": parsed[2],
+                "clock": session_clock_range(p), "path": p, "name": f, "sources": sources,
+                "setups": _json.loads(meta.get("StintSetups", "[]")),
+            })
+
+    new = [c for c in candidates if c[0] not in covered]
+    for fname, _, _ in candidates:
+        if fname in covered:
+            skipped.append({"file": fname, "reason": "already stitched"})
+    if not new:
+        return
+
+    tmp_files = []
+    try:
+        for i, (fname, ld_path, parsed) in enumerate(new):
+            tmp = os.path.join(data_dir, f"_tmp_stitch_{i}.duckdb")
+            try:
+                info = convert_ld_to_duckdb(ld_path, tmp)
+            except Exception as e:
+                logger.error(f"Sync: failed to convert {fname}: {e}", exc_info=True)
+                errors.append({"file": fname, "error": str(e)})
+                continue
+            tmp_files.append(tmp)
+            setup = None
+            ldx = os.path.splitext(ld_path)[0] + ".ldx"
+            if os.path.exists(ldx):
+                try:
+                    setup = parse_ldx(ldx)["setup"]
+                except Exception as e:
+                    logger.warning(f"Sync: unreadable {ldx}: {e}")
+            segments.append({
+                "kind": "new", "track": parsed[0].lower(), "letter": parsed[1], "dt": parsed[2],
+                "clock": session_clock_range(tmp), "path": tmp, "fname": fname, "info": info,
+                "driven": left_pits(tmp), "setup": setup,
+            })
+
+        # Chain segments: same game session when the session clock carries on from
+        # the previous recording (a new session restarts it near 0), without running
+        # ahead of the wall clock. It may lag behind it: the game pauses the clock
+        # (menus, garage), measured ~1% drift up to minutes-long pauses.
+        segments.sort(key=lambda s: (s["track"], s["letter"], s["dt"]))
+        chains, cur = [], []
+        for s in segments:
+            if cur:
+                p = cur[-1]
+                d_wall = (s["dt"] - p["dt"]).total_seconds()
+                d_clock = s["clock"][0] - p["clock"][0]
+                wall_gap = d_wall - (p["clock"][1] - p["clock"][0])   # ~ time between recordings
+                if (s["track"] == p["track"] and s["letter"] == p["letter"]
+                        and s["clock"][0] >= p["clock"][1] - 1.0
+                        and d_clock <= d_wall + 5.0 and wall_gap <= 20 * 60):
+                    cur.append(s)
+                    continue
+                chains.append(cur)
+            cur = [s]
+        if cur:
+            chains.append(cur)
+
+        for chain in chains:
+            news = [s for s in chain if s["kind"] == "new"]
+            if not news:
+                continue
+            first = chain[0]
+            dest_name = first["name"] if first["kind"] == "db" else _canonical_db_name(first["info"])
+            dest = os.path.join(data_dir, dest_name)
+
+            dbs = [s for s in chain if s["kind"] == "db"]
+            driven = [s for s in news if s["driven"]]
+            if not driven and not dbs:
+                driven = news   # nothing but garage time so far: keep it anyway
+            parts = [s["path"] for s in dbs] + [s["path"] for s in driven]
+            sources = [f for s in dbs for f in s["sources"]] + [s["fname"] for s in news]
+            setups = [st for s in dbs for st in s["setups"]] + [
+                {"source": s["fname"], "start": s["clock"][0], "end": s["clock"][1], "setup": s["setup"]}
+                for s in driven
+            ]
+            setups.sort(key=lambda st: st["start"])
+
+            out_tmp = os.path.join(data_dir, "_tmp_stitch_out.duckdb")
+            try:
+                concat_sessions(parts, out_tmp, sources, setups)
+                os.replace(out_tmp, dest)
+            except Exception as e:
+                logger.error(f"Sync: stitching into {dest_name} failed: {e}", exc_info=True)
+                errors.append({"file": ", ".join(s["fname"] for s in news), "error": str(e)})
+                if os.path.exists(out_tmp):
+                    os.remove(out_tmp)
+                continue
+            _clear_session_cache(cache_dir, dest_name)
+            existing_db.add(dest_name.lower())
+
+            # Drop other stitched sessions the chain absorbed
+            for name in {s["name"] for s in dbs} - {dest_name}:
+                old = os.path.join(data_dir, name)
+                if os.path.exists(old):
+                    try:
+                        os.remove(old)
+                        _clear_session_cache(cache_dir, name)
+                        existing_db.discard(name.lower())
+                        logger.info(f"Sync: removed {name} (superseded by {dest_name})")
+                    except Exception as e:
+                        logger.warning(f"Sync: could not remove superseded {name}: {e}")
+
+            imported.append({"file": ", ".join(s["fname"] for s in news), "id": dest_name,
+                             "stitched": len(parts)})
+            logger.info(f"Sync: stitched {len(news)} new recording(s) into {dest_name} ({len(parts)} parts)")
+    finally:
+        for tmp in tmp_files:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+
+
 class LmuSyncRequest(BaseModel):
     profile_id: Optional[str] = "guest"
     telemetry_dir: Optional[str] = None   # default: auto-detect
@@ -847,13 +998,23 @@ async def sync_lmu_sessions(req: LmuSyncRequest):
             errors.append({"file": fname, "error": str(e)})
 
     # ── 2. Index imported sessions by (track, letter, time) ─────────────────
+    # Sessions converted from .ld share the native naming scheme but aren't merge
+    # targets (a native .ld would otherwise "merge" into its own conversion).
     native_index = []
     for fname in os.listdir(data_dir):
         if not fname.lower().endswith(".duckdb"):
             continue
         parsed = _parse_native_session_name(fname)
-        if parsed:
-            native_index.append((parsed[0], parsed[1], parsed[2], fname))
+        if not parsed:
+            continue
+        try:
+            with duckdb.connect(os.path.join(data_dir, fname), read_only=True) as con:
+                src = con.execute("SELECT value FROM metadata WHERE key = 'Source'").fetchone()
+            if src and str(src[0]).startswith("ld_converter"):
+                continue
+        except Exception:
+            continue
+        native_index.append((parsed[0], parsed[1], parsed[2], fname))
 
     def _already_merged(db_path: str) -> bool:
         try:
@@ -875,6 +1036,7 @@ async def sync_lmu_sessions(req: LmuSyncRequest):
                     ld_entries[f] = os.path.join(src_dir, f)
 
     tmp_path = os.path.join(data_dir, "_tmp_ld_sync.duckdb")
+    stitch_candidates = []
     for fname in sorted(ld_entries):
         ld_path = ld_entries[fname]
         parsed = _parse_ld_session_name(fname)
@@ -892,6 +1054,11 @@ async def sync_lmu_sessions(req: LmuSyncRequest):
             ]
             if candidates:
                 target = min(candidates)[1]
+
+        if not target and parsed and os.path.dirname(ld_path) == telemetry_dir:
+            # Game-native per-pit-exit recording: stitched per game session below
+            stitch_candidates.append((fname, ld_path, parsed))
+            continue
 
         try:
             if target:
@@ -919,7 +1086,9 @@ async def sync_lmu_sessions(req: LmuSyncRequest):
             else:
                 # No matching native session: legacy standalone import (dedup by canonical name)
                 legacy_name = os.path.splitext(fname)[0] + ".duckdb"
-                if legacy_name.lower() in existing_db:
+                expected = (f"{parsed[0]}_{parsed[1]}_{parsed[2]:%Y-%m-%dT%H_%M_%S}Z.duckdb"
+                            if parsed else None)
+                if legacy_name.lower() in existing_db or (expected and expected.lower() in existing_db):
                     skipped.append({"file": fname, "reason": "already imported"})
                     continue
                 info = convert_ld_to_duckdb(ld_path, tmp_path)
@@ -941,6 +1110,10 @@ async def sync_lmu_sessions(req: LmuSyncRequest):
                     os.remove(tmp_path)
                 except Exception:
                     pass
+
+    if stitch_candidates:
+        _stitch_native_ld_sessions(stitch_candidates, data_dir, cache_dir,
+                                   existing_db, imported, skipped, errors)
 
     return {
         "imported": imported,

@@ -135,12 +135,14 @@ class TelemetryService:
                         if valid_lap_dur:
                             s3_split = float(valid_lap_dur) - float(s2_val)
                 
-                # Check if car was in pits during this lap
+                # Check if car entered the pits during this lap. A pit state already
+                # set at the lap start (recording starts in the garage) doesn't count,
+                # otherwise the first flying lap after an out-lap is flagged out-lap too.
                 in_pit = False
                 for p_ts, p_val in in_pits_events:
                     if p_ts >= t_end:
                         break
-                    if p_ts >= t_start and p_val > 0.5:
+                    if p_ts > t_start + 0.5 and p_val > 0.5:
                         in_pit = True
                         break
                 
