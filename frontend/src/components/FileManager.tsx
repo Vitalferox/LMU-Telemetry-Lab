@@ -5,7 +5,7 @@ import type { Session } from '../types';
 import {
     Database, Search, Upload, Link, Trash2, Settings2, Check, X, Info, Loader2,
     ChevronRight, ChevronDown, MapPin, History as HistoryIcon, Timer, Package, Car, Trophy, LayoutGrid, Clock,
-    FolderSync, Plug, AlertTriangle, Share2
+    FolderSync, Share2
 } from 'lucide-react';
 import { handleGlassMouseMove } from '../utils/glassEffect';
 import { Tooltip } from './ui/Tooltip';
@@ -50,8 +50,6 @@ export const FileManager: React.FC<FileManagerProps> = ({
     const [newlyUploadedIds, setNewlyUploadedIds] = useState<Set<string>>(new Set());
     const [isImporting, setIsImporting] = useState(false);
     const [importMessage, setImportMessage] = useState<string | null>(null);
-    const [damPluginStatus, setDamPluginStatus] = useState<{ installed: boolean; assets_available: boolean; error?: string } | null>(null);
-    const [damPluginLoading, setDamPluginLoading] = useState(false);
     const [sharedIds, setSharedIds] = useState<Set<string>>(new Set());
     const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
     const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
@@ -107,33 +105,6 @@ export const FileManager: React.FC<FileManagerProps> = ({
         };
         checkPath();
     }, [telemetryPath]);
-
-    const refreshDamPluginStatus = React.useCallback(async () => {
-        try {
-            const s = await apiClient.getDamPluginStatus();
-            setDamPluginStatus(s);
-        } catch { setDamPluginStatus(null); }
-    }, []);
-
-    React.useEffect(() => { refreshDamPluginStatus(); }, [refreshDamPluginStatus]);
-
-    const handleDamPluginToggle = async () => {
-        if (!damPluginStatus || damPluginLoading) return;
-        setDamPluginLoading(true);
-        try {
-            if (damPluginStatus.installed) {
-                const s = await apiClient.deactivateDamPlugin();
-                setDamPluginStatus(s);
-            } else {
-                const s = await apiClient.activateDamPlugin();
-                setDamPluginStatus(s);
-            }
-        } catch (e: any) {
-            console.error('DAMPlugin toggle failed:', e);
-        } finally {
-            setDamPluginLoading(false);
-        }
-    };
 
     const refreshShared = React.useCallback(async () => {
         try {
@@ -638,7 +609,7 @@ export const FileManager: React.FC<FileManagerProps> = ({
         try {
             const result = await apiClient.syncLmuSessions(activeProfileId, telemetryPath);
             await fetchSessions();
-            if (result.imported.length > 0 || result.merged.length > 0) {
+            if (result.imported.length > 0) {
                 setImportMessage(`✓ ${result.message}`);
                 setTimeout(() => {
                     const freshSessions = useTelemetryStore.getState().sessions;
@@ -866,44 +837,6 @@ export const FileManager: React.FC<FileManagerProps> = ({
                     >{importMessage}</div>
                 )}
             </div>
-
-            {damPluginStatus && !damPluginStatus.error && damPluginStatus.assets_available && (
-                <div className="px-4 pt-1 pb-1">
-                    <div className={`flex items-center justify-between p-2.5 rounded-xl border transition-all ${
-                        damPluginStatus.installed
-                            ? 'bg-green-500/5 border-green-500/20'
-                            : 'bg-orange-500/5 border-orange-500/20'
-                    }`}>
-                        <div className="flex items-center gap-2 min-w-0">
-                            <div className={`p-1.5 rounded-lg ${damPluginStatus.installed ? 'bg-green-500/10' : 'bg-orange-500/10'}`}>
-                                {damPluginStatus.installed ? <Plug size={12} className="text-green-400" /> : <AlertTriangle size={12} className="text-orange-400" />}
-                            </div>
-                            <div className="min-w-0">
-                                <span className="text-[10px] font-black uppercase tracking-widest text-white block">DAMPlugin</span>
-                                <span className={`text-[9px] font-bold uppercase tracking-wider ${damPluginStatus.installed ? 'text-green-400' : 'text-orange-400'}`}>
-                                    {damPluginStatus.installed ? 'Installed — 245 channels' : 'Not installed'}
-                                </span>
-                            </div>
-                        </div>
-                        <button
-                            onClick={handleDamPluginToggle}
-                            disabled={damPluginLoading}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[9px] font-black uppercase tracking-widest transition-all ${
-                                damPluginLoading
-                                    ? 'opacity-50 cursor-wait'
-                                    : damPluginStatus.installed
-                                        ? 'bg-red-500/10 border-red-500/20 text-red-400 hover:bg-red-500/20 hover:border-red-500/30'
-                                        : 'bg-green-500/10 border-green-500/20 text-green-400 hover:bg-green-500/20 hover:border-green-500/30'
-                            }`}
-                        >
-                            {damPluginLoading
-                                ? <Loader2 size={10} className="animate-spin" />
-                                : damPluginStatus.installed ? 'Remove' : 'Install'
-                            }
-                        </button>
-                    </div>
-                </div>
-            )}
 
             {error && (
                 <div className="mx-4 my-1.5 p-3 bg-red-950/40 border border-red-500/30 text-red-400 rounded-xl text-[10px] uppercase tracking-wider font-bold">

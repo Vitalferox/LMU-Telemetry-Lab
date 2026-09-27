@@ -119,11 +119,6 @@ backend/diag_output.txt
 backend/telemetry.duckdb
 
 # ===========================
-# DAMPlugin assets (third-party DLL)
-# ===========================
-backend/assets/damplugin/
-
-# ===========================
 # OS & Editor
 # ===========================
 .DS_Store

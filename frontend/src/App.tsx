@@ -774,15 +774,15 @@ function App() {
     }
   }, [activeProfileId, fetchSessions]);
 
-  // Auto-sync with the game folders at startup: import the latest native
-  // .duckdb sessions and merge matching DAMPlugin .ld channels into them.
+  // Auto-sync with the game's Telemetry folder at startup: import new sessions
+  // (native .ld recordings of a game session are stitched into one).
   const lmuSyncDone = useRef(false);
   useEffect(() => {
     if (!activeProfileId || lmuSyncDone.current) return;
     lmuSyncDone.current = true;
     apiClient.syncLmuSessions(activeProfileId)
       .then(result => {
-        if (result.imported.length > 0 || result.merged.length > 0) {
+        if (result.imported.length > 0) {
           console.log(`[LMU Sync] ${result.message}`);
           fetchSessions();
         }

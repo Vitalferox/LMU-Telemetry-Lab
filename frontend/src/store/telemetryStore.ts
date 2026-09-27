@@ -454,7 +454,7 @@ export const CATEGORY_CHART_CONFIGS: Record<ChartCategory, ChartConfig[]> = {
         { id: 'SoC', alias: 'Hybrid SoC', color: '#10b981', visible: true, order: 2, height: 120, unit: 'MJ' },
         { id: 'Fuel Level', alias: 'Fuel Level', color: '#facc15', visible: true, order: 3, height: 120, unit: 'L' },
     ],
-    // Engineer Mode tabs (DAMPlugin channels)
+    // Engineer Mode tabs (advanced channels, shown when present in the session)
     TyresPro: [
         { id: 'TyreLoad', alias: 'Tyre Load FL', color: '#3b82f6', visible: true, order: 0, height: 140, unit: 'N', wheelIndex: 0 },
         { id: 'TyreLoad', alias: 'Tyre Load FR', color: '#ef4444', visible: true, order: 1, height: 140, unit: 'N', wheelIndex: 1 },

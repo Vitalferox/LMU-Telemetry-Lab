@@ -89,8 +89,6 @@ _LOCAL_ONLY_PATHS = {
     "/api/v1/system/open-path",
     "/api/v1/system/pick-and-upload",
     "/api/v1/debug/env",
-    "/api/v1/system/damplugin/activate",
-    "/api/v1/system/damplugin/deactivate",
 }
 
 
