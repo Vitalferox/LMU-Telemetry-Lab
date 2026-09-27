@@ -1,6 +1,6 @@
 """Transform raw DuckDB telemetry into compact statistical summaries for the LLM.
 
-Each prepare_* function returns a plain string (max ~4000 chars) that gets injected
+Each prepare_* function returns a plain string that gets injected
 into the user message — the LLM never sees raw sample arrays.
 """
 
@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
+from pathlib import Path
 import duckdb
 import numpy as np
 from typing import Optional
@@ -15,6 +18,9 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 NUM_ZONES = 10
+_MAX_LAPS_FOR_BEST = 30  # caps the fusing work when computing per-segment bests
+# Hand-tuned per-circuit corner segments shipped with the frontend (upstream data)
+_SEGMENTS_FILE = Path(__file__).resolve().parents[4] / "frontend" / "src" / "assets" / "track_segments.json"
 
 
 def _get_metadata(db_path: str) -> dict:
@@ -43,72 +49,128 @@ def _fuse_lap(db_path: str, lap: dict, freq: int = 20):
     return df
 
 
-def _zone_stats(df, zone_idx: int, total_zones: int = NUM_ZONES) -> dict:
-    """Compute stats for a single distance-based zone."""
-    lap_dist = np.array(df["Lap Dist"]) if "Lap Dist" in df.columns else None
-    if lap_dist is None or len(lap_dist) == 0:
-        return {}
+def _wheel_array(df, col: str) -> Optional[np.ndarray]:
+    """Per-wheel channels are stored as one [FL, FR, RL, RR] list per sample -> (n, 4) array."""
+    if col not in df.columns:
+        return None
+    rows = [x if isinstance(x, (list, tuple, np.ndarray)) and len(x) == 4 else [np.nan] * 4 for x in df[col]]
+    arr = np.array(rows, dtype=float)
+    return arr if arr.size and not np.all(np.isnan(arr)) else None
 
-    max_dist = np.nanmax(lap_dist)
-    if max_dist <= 0:
-        return {}
 
-    zone_start = (zone_idx / total_zones) * max_dist
-    zone_end = ((zone_idx + 1) / total_zones) * max_dist
-    mask = (lap_dist >= zone_start) & (lap_dist < zone_end)
+def _find_track_key(data: dict, track_name: str) -> Optional[str]:
+    """Same matching as the frontend's mini-sectors: exact, accent/punctuation-insensitive, then word overlap."""
+    def clean(name: str) -> str:
+        name = unicodedata.normalize("NFD", name)
+        name = "".join(c for c in name if unicodedata.category(c) != "Mn").lower()
+        return re.sub(r"[^a-z0-9]", " ", name).strip()
 
-    if not mask.any():
-        return {}
+    target = clean(track_name)
+    for key in data:
+        if key.lower() == track_name.lower() or clean(key) == target:
+            return key
+    target_words = [w for w in target.split() if len(w) > 2]
+    for key in data:
+        key_words = [w for w in clean(key).split() if len(w) > 2]
+        overlap = [w for w in key_words if w in target_words]
+        if key_words and target_words and len(overlap) >= min(len(key_words), len(target_words)) * 0.7:
+            return key
+    return None
 
-    stats: dict = {"zone": f"{zone_idx * 10}-{(zone_idx + 1) * 10}%"}
 
-    # Speed
-    if "Ground Speed" in df.columns:
-        speed = np.array(df["Ground Speed"])[mask]
-        speed_vals = speed[~np.isnan(speed)]
-        if len(speed_vals) > 0:
-            max_speed = float(np.max(speed_vals))
-            # Convert to km/h if in m/s
-            if max_speed < 100:
-                speed_vals = speed_vals * 3.6
-            stats["speed_min"] = round(float(np.min(speed_vals)), 1)
-            stats["speed_max"] = round(float(np.max(speed_vals)), 1)
+def _load_segments(meta: dict, lap_length: float) -> tuple[list[tuple[str, float, float]], str]:
+    """Split the lap into the track's hand-tuned corner segments (upstream track_segments.json).
 
-    # Brake
-    if "Brake Pos" in df.columns:
-        brake = np.array(df["Brake Pos"])[mask]
-        brake_vals = brake[~np.isnan(brake)]
-        if len(brake_vals) > 0:
-            stats["max_brake_pct"] = round(float(np.max(brake_vals)), 1)
-            heavy_brake = brake_vals > 30
-            if heavy_brake.any():
-                first_heavy = np.argmax(heavy_brake)
-                stats["brake_point_pct"] = round(first_heavy / len(brake_vals) * 100, 1)
+    Falls back to 10 equal distance zones when the circuit isn't known. Returns
+    ([(name, start_m, end_m), ...], source description).
+    """
+    try:
+        data = json.loads(_SEGMENTS_FILE.read_text(encoding="utf-8"))
+        key = _find_track_key(data, meta.get("TrackName", ""))
+        if key:
+            layouts = data[key]
+            chosen = layouts.get(meta.get("TrackLayout", "")) or layouts.get("Default") or next(iter(layouts.values()))
+            bounds, prev = [], 0.0
+            for seg in chosen.get("segments", []):
+                bounds.append((seg["name"], prev, float(seg["end"])))
+                prev = float(seg["end"])
+            if bounds:
+                # The last segment runs to the finish line whatever this car's measured lap length
+                bounds[-1] = (bounds[-1][0], bounds[-1][1], max(bounds[-1][2], lap_length))
+                return bounds, "segments du circuit (complexes de virages)"
+    except Exception as e:
+        logger.warning(f"Track segments unavailable, using equal zones: {e}")
 
-    # Throttle
-    if "Throttle Pos" in df.columns:
-        throttle = np.array(df["Throttle Pos"])[mask]
-        throttle_vals = throttle[~np.isnan(throttle)]
-        if len(throttle_vals) > 0:
-            throttle_on = throttle_vals > 20
-            if throttle_on.any():
-                first_on = np.argmax(throttle_on)
-                stats["throttle_on_pct"] = round(first_on / len(throttle_vals) * 100, 1)
+    step = lap_length / NUM_ZONES
+    return [(f"Zone {i + 1}", i * step, (i + 1) * step) for i in range(NUM_ZONES)], "10 zones de distance égales"
 
-    # Lateral G
-    if "G Force Lat" in df.columns:
-        g_lat = np.array(df["G Force Lat"])[mask]
-        g_vals = g_lat[~np.isnan(g_lat)]
-        if len(g_vals) > 0:
-            stats["max_lat_g"] = round(float(np.max(np.abs(g_vals))), 2)
 
-    # Time spent in zone
-    if "Time" in df.columns:
-        time = np.array(df["Time"])[mask]
-        if len(time) > 1:
-            stats["time_s"] = round(float(time[-1] - time[0]), 2)
+def _lap_arrays(df) -> Optional[dict]:
+    """Extract the scalar channels used by the segment metrics, as numpy arrays."""
+    if "Lap Dist" not in df.columns or "Time" not in df.columns:
+        return None
+    a = {"dist": np.maximum.accumulate(np.nan_to_num(np.array(df["Lap Dist"], dtype=float))),
+         "time": np.array(df["Time"], dtype=float)}
+    for key, col in (("speed", "Ground Speed"), ("brake", "Brake Pos"), ("throttle", "Throttle Pos"),
+                     ("lat_g", "G Force Lat")):
+        a[key] = np.array(df[col], dtype=float) if col in df.columns else None
+    if a["speed"] is not None and np.nanmax(a["speed"]) < 100:
+        a["speed"] = a["speed"] * 3.6  # m/s -> km/h
+    return a
 
+
+def _time_at(a: dict, d: float) -> float:
+    return float(np.interp(d, a["dist"], a["time"]))
+
+
+def _segment_stats(a: dict, name: str, start: float, end: float) -> dict:
+    """Driver metrics for one track segment. Distances are metres from the start line."""
+    mask = (a["dist"] >= start) & (a["dist"] < end)
+    stats: dict = {"segment": name, "from_m": int(start), "to_m": int(end),
+                   "time_s": round(_time_at(a, end) - _time_at(a, start), 3)}
+    if mask.sum() < 3:
+        return stats
+    dist, t = a["dist"][mask], a["time"][mask]
+    dt = np.gradient(t)
+
+    i_min = 0
+    if a["speed"] is not None:
+        seg_speed = a["speed"][mask]
+        i_min = int(np.nanargmin(seg_speed))
+        stats.update({
+            "entry_kmh": round(float(np.interp(start, a["dist"], a["speed"])), 1),
+            "min_kmh": round(float(seg_speed[i_min]), 1),
+            "min_at_m": int(dist[i_min]),
+            "exit_kmh": round(float(np.interp(end, a["dist"], a["speed"])), 1),
+        })
+
+    brake = a["brake"][mask] if a["brake"] is not None else None
+    throttle = a["throttle"][mask] if a["throttle"] is not None else None
+    if brake is not None:
+        on = brake > 10
+        if on.any():
+            stats["brake_start_m"] = int(dist[np.argmax(on)])
+            stats["brake_peak_pct"] = round(float(np.nanmax(brake)), 1)
+            stats["braking_s"] = round(float(dt[on].sum()), 2)
+            # Trail braking: still on the brake while already turning hard
+            if a["lat_g"] is not None:
+                trail = on & (np.abs(a["lat_g"][mask]) > 1.0)
+                stats["trail_braking_s"] = round(float(dt[trail].sum()), 2)
+    if throttle is not None:
+        stats["full_throttle_pct"] = round(float(dt[throttle > 95].sum() / dt.sum() * 100), 1)
+        after_min = throttle[i_min:] > 90
+        if after_min.any():
+            stats["full_throttle_from_m"] = int(dist[i_min + int(np.argmax(after_min))])
+        if brake is not None:
+            coast = (throttle < 10) & (brake < 5)
+            stats["coasting_s"] = round(float(dt[coast].sum()), 2)
+    if a["lat_g"] is not None:
+        stats["max_lat_g"] = round(float(np.nanmax(np.abs(a["lat_g"][mask]))), 2)
     return stats
+
+
+# Fields repeated for the reference lap next to the analysed lap's own (keeps the prompt compact)
+_REF_FIELDS = ("time_s", "entry_kmh", "min_kmh", "exit_kmh", "brake_start_m", "full_throttle_from_m")
 
 
 def prepare_lap_analysis(
@@ -116,7 +178,12 @@ def prepare_lap_analysis(
     lap_idx: int,
     reference_lap_idx: Optional[int] = None,
 ) -> str:
-    """Build a compact zone-by-zone summary for a single lap."""
+    """Build a segment-by-segment summary of one lap, compared to a reference lap.
+
+    Without an explicit reference, the session's best valid lap is used. Each segment
+    also carries the driver's best time for it across the session, which gives the
+    ideal lap and shows where time is left on the table.
+    """
     meta = _get_metadata(db_path)
     laps = _get_laps_info(db_path)
 
@@ -125,52 +192,69 @@ def prepare_lap_analysis(
         return f"Error: Lap {lap_idx} not found in session."
 
     df = _fuse_lap(db_path, target_lap)
-    zones = [_zone_stats(df, i) for i in range(NUM_ZONES)]
-    zones = [z for z in zones if z]
+    a = _lap_arrays(df)
+    if a is None:
+        return "Error: Lap has no distance/time channels."
+    bounds, seg_source = _load_segments(meta, float(a["dist"][-1]))
+    segments = [_segment_stats(a, *b) for b in bounds]
 
-    # Tyre temps summary (average over the lap)
-    tyre_info = _tyre_summary(df)
+    valid = [l for l in laps if l["isValid"] and not l.get("isOutLap")][:_MAX_LAPS_FOR_BEST]
+    ref_source = "choisi par le pilote"
+    if reference_lap_idx is None:
+        others = [l for l in valid if l["lap"] != lap_idx]
+        if others:
+            reference_lap_idx = min(others, key=lambda l: l["duration"])["lap"]
+            ref_source = "meilleur des autres tours valides de la session (le tour analysé est exclu)"
 
-    result = {
+    # Every valid lap's segment times -> best per segment (ideal lap)
+    lap_arrays = {lap_idx: a}
+    for l in valid:
+        if l["lap"] not in lap_arrays:
+            la = _lap_arrays(_fuse_lap(db_path, l))
+            if la is not None:
+                lap_arrays[l["lap"]] = la
+    best_seg = [min((_time_at(la, e) - _time_at(la, s), n) for n, la in lap_arrays.items())
+                for _, s, e in bounds]
+
+    ref_lap = next((l for l in laps if l["lap"] == reference_lap_idx), None) if reference_lap_idx is not None else None
+    ref_a = None
+    if ref_lap:
+        ref_a = lap_arrays.get(reference_lap_idx) or _lap_arrays(_fuse_lap(db_path, ref_lap))
+
+    for i, seg in enumerate(segments):
+        best_t, best_lap = best_seg[i]
+        seg["best_in_session_s"] = round(best_t, 3)
+        seg["best_on_lap"] = best_lap
+        seg["loss_vs_best_s"] = round(seg["time_s"] - best_t, 3)
+        if ref_a is not None:
+            ref = _segment_stats(ref_a, *bounds[i])
+            seg["reference"] = {k: ref[k] for k in _REF_FIELDS if k in ref}
+            seg["delta_vs_ref_s"] = round(seg["time_s"] - ref["time_s"], 3)
+
+    result: dict = {
         "circuit": meta.get("TrackName", "Unknown"),
+        "layout": meta.get("TrackLayout", ""),
         "car": meta.get("CarName", "Unknown"),
         "car_class": meta.get("CarClass", "Unknown"),
         "driver": meta.get("DriverName", "Unknown"),
         "lap_number": lap_idx,
         "lap_time": round(target_lap["duration"], 3),
-        "sectors": {
-            "s1": target_lap.get("s1"),
-            "s2": target_lap.get("s2"),
-            "s3": target_lap.get("s3"),
-        },
-        "zones": zones,
+        "sectors": {k: target_lap.get(k) for k in ("s1", "s2", "s3")},
+        "ideal_lap_s": round(sum(t for t, _ in best_seg), 3),
+        "segmentation": seg_source,
+        "units": "distances en m depuis la ligne, vitesses en km/h, temps en s",
+        "segments": segments,
     }
+    if ref_a is not None:
+        result["reference_lap"] = {"lap_number": reference_lap_idx,
+                                   "lap_time": round(ref_lap["duration"], 3), "source": ref_source}
+        result["delta_vs_ref_s"] = round(target_lap["duration"] - ref_lap["duration"], 3)
+
+    tyre_info = _tyre_summary(df)
     if tyre_info:
         result["tyres"] = tyre_info
 
-    # Reference lap comparison
-    if reference_lap_idx is not None:
-        ref_lap = next((l for l in laps if l["lap"] == reference_lap_idx), None)
-        if ref_lap:
-            ref_df = _fuse_lap(db_path, ref_lap)
-            ref_zones = [_zone_stats(ref_df, i) for i in range(NUM_ZONES)]
-            ref_zones = [z for z in ref_zones if z]
-            result["reference"] = {
-                "lap_number": reference_lap_idx,
-                "lap_time": round(ref_lap["duration"], 3),
-                "sectors": {
-                    "s1": ref_lap.get("s1"),
-                    "s2": ref_lap.get("s2"),
-                    "s3": ref_lap.get("s3"),
-                },
-                "zones": ref_zones,
-            }
-            result["delta_s"] = round(target_lap["duration"] - ref_lap["duration"], 3)
-
-    text = json.dumps(result, ensure_ascii=False, default=str)
-    if len(text) > 5000:
-        text = text[:5000] + "...(truncated)"
-    return text
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 def prepare_session_analysis(db_path: str) -> str:
@@ -308,8 +392,8 @@ def prepare_setup_analysis(
 
     # Tyre load
     if "TyreLoad" in df.columns:
-        tl = np.array(df["TyreLoad"])
-        if tl.ndim == 2 and tl.shape[1] == 4:
+        tl = _wheel_array(df, "TyreLoad")
+        if tl is not None:
             result["tyre_load_avg_N"] = {
                 "FL": round(float(np.nanmean(tl[:, 0])), 0),
                 "FR": round(float(np.nanmean(tl[:, 1])), 0),
@@ -319,8 +403,8 @@ def prepare_setup_analysis(
 
     # Grip fraction
     if "GripFract" in df.columns:
-        gf = np.array(df["GripFract"])
-        if gf.ndim == 2 and gf.shape[1] == 4:
+        gf = _wheel_array(df, "GripFract")
+        if gf is not None:
             result["grip_fraction_avg"] = {
                 "FL": round(float(np.nanmean(gf[:, 0])), 3),
                 "FR": round(float(np.nanmean(gf[:, 1])), 3),
@@ -339,24 +423,31 @@ def prepare_setup_analysis(
 
 
 def _tyre_summary(df) -> Optional[dict]:
-    """Extract average tyre temps (centre, and I/C/O if available) for all 4 wheels."""
+    """Per-wheel tyre/brake state over the lap: temps I/C/O, carcass, pressures, wear, brakes."""
     wheels = ["FL", "FR", "RL", "RR"]
     info: dict = {}
 
-    if "TyresTempCentre" in df.columns:
-        tc = np.array(df["TyresTempCentre"])
-        if tc.ndim == 2 and tc.shape[1] == 4:
-            info["centre_avg"] = {w: round(float(np.nanmean(tc[:, i])), 1) for i, w in enumerate(wheels)}
+    def avg(arr):
+        return {w: round(float(np.nanmean(arr[:, i])), 1) for i, w in enumerate(wheels)}
 
-    for label, col in [("inside_avg", "TyresTempLeft"), ("outside_avg", "TyresTempRight")]:
-        if col in df.columns:
-            arr = np.array(df[col])
-            if arr.ndim == 2 and arr.shape[1] == 4:
-                info[label] = {w: round(float(np.nanmean(arr[:, i])), 1) for i, w in enumerate(wheels)}
+    # DAMPlugin rubber temps first (steadier), native I/C/O channels otherwise
+    for cols in (("TyresRubberTempInner", "TyresRubberTemp", "TyresRubberTempOuter"),
+                 ("TyresTempInside", "TyresTempCentre", "TyresTempOutside")):
+        arrs = [_wheel_array(df, c) for c in cols]
+        if all(x is not None for x in arrs):
+            info["temp_inner_avg_c"], info["temp_centre_avg_c"], info["temp_outer_avg_c"] = (avg(x) for x in arrs)
+            break
 
-    if "TyresPressure" in df.columns:
-        tp = np.array(df["TyresPressure"])
-        if tp.ndim == 2 and tp.shape[1] == 4:
-            info["pressure_avg_kpa"] = {w: round(float(np.nanmean(tp[:, i])), 1) for i, w in enumerate(wheels)}
+    for label, col in (("carcass_avg_c", "TyresCarcassTemp"), ("pressure_avg_kpa", "TyresPressure"),
+                       ("brake_temp_avg_c", "Brakes Temp")):
+        arr = _wheel_array(df, col)
+        if arr is not None:
+            info[label] = avg(arr)
+
+    wear = _wheel_array(df, "Tyres Wear")
+    if wear is not None:
+        rows = wear[~np.isnan(wear).any(axis=1)]
+        if len(rows) > 1:
+            info["wear_this_lap_pct"] = {w: round(float(rows[-1, i] - rows[0, i]), 2) for i, w in enumerate(wheels)}
 
     return info if info else None
