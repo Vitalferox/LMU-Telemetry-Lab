@@ -17,6 +17,10 @@ metadata:
 
 **Conséquence** : les nouvelles sessions s'importent telles quelles. Le convertisseur .ld sert uniquement aux archives.
 
+## ⚠️ ÉTAT ACTUEL (2026-09-27) — remplace les sections DAMPlugin ci-dessous
+
+Depuis ~fin juillet 2026, le jeu écrit **un trio `.ld` + `.ldx` + `.svm` par sortie de stand** dans `UserData\Telemetry\` (plus de `.duckdb`). Ce `.ld` natif a exactement les 245 canaux de DAMPlugin → **DAMPlugin supprimé** (DLL retirée du jeu, gestionnaire/fusion/scan `LOG\` retirés du code, commit `da99744`). `POST /sessions/sync-lmu` importe les `.duckdb` natifs éventuels et **regroupe les `.ld` d'une même session de jeu en une seule session** (`_stitch_native_ld_sessions` + `concat_sessions`, horloge de session commune, incrémental via metadata `SourceFiles`). Le setup du `.ldx` alimente `CarSetup` (vue Car Setup + coach). On ne gère plus l'ancien format (sessions de juin laissées telles quelles).
+
 ## Architecture
 
 - **Sources** : `F:\SteamLibrary\steamapps\common\Le Mans Ultimate\UserData\Telemetry\` (.duckdb natifs, nouvelles sessions) + `...\LOG\` (28 anciens .ld DAMPlugin 70 canaux, archives — convertibles).
